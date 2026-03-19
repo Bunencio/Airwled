@@ -93,7 +93,6 @@ def generar_archivos(excel_file):
             "Venta principal": item["Venta principal"],
             "Tipo": item["Tipo"],
             "SKU": skus,
-            "Ventas detalle": ventas_detalle,
             "Unidades": unidades,
             "Productos": titulos
         })
