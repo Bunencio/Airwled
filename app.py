@@ -29,7 +29,7 @@ def generar_archivos(excel_file):
     col_venta = df.columns[0]
     col_estado = df.columns[2]
     col_unidades = df.columns[6]
-    col_sku = df.columns[12]
+    col_sku = df.columns[16]
     col_titulo = df.columns[20]
 
     resultado = []
