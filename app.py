@@ -152,7 +152,7 @@ def generar_archivos(excel_file):
         Paragraph("<b>Venta principal</b>", style_header),
         Paragraph("<b>Tipo</b>", style_header),
         Paragraph("<b>SKU</b>", style_header),
-        Paragraph("<b>Ventas detalle</b>", style_header),
+        
         Paragraph("<b>Unidades</b>", style_header),
         Paragraph("<b>Productos</b>", style_header),
     ]
@@ -165,7 +165,7 @@ def generar_archivos(excel_file):
             Paragraph(str(row["Venta principal"]).replace("\n", "<br/>"), style_cell),
             Paragraph(str(row["Tipo"]).replace("\n", "<br/>"), style_cell),
             Paragraph(str(row["SKU"]).replace("\n", "<br/>"), style_cell),
-            Paragraph(str(row["Ventas detalle"]).replace("\n", "<br/>"), style_cell),
+            
             Paragraph(str(row["Unidades"]).replace("\n", "<br/>"), style_center),
             Paragraph(str(row["Productos"]).replace("\n", "<br/>"), style_cell),
         ])
@@ -175,7 +175,7 @@ def generar_archivos(excel_file):
         1.45 * inch,  # venta principal
         1.40 * inch,  # tipo
         1.70 * inch,  # sku
-        1.60 * inch,  # ventas detalle
+        
         0.80 * inch,  # unidades
         3.80 * inch   # productos
     ]
