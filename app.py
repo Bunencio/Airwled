@@ -83,7 +83,7 @@ def generar_archivos(excel_file):
     filas_finales = []
 
     for item in resultado:
-        ventas_detalle = "\n".join([x["Venta"] for x in item["Grupo"]])
+        
         unidades = "\n".join([x["Unidades"] for x in item["Grupo"]])
         skus = "\n".join([x["SKU"] for x in item["Grupo"]])
         titulos = "\n".join([x["Titulo"] for x in item["Grupo"]])
