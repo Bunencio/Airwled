@@ -1,7 +1,9 @@
-import io
-import re
+!pip install pandas openpyxl reportlab -q
+
 import pandas as pd
-import streamlit as st
+import re
+from google.colab import files
+
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -9,194 +11,194 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.units import inch
 
-st.set_page_config(page_title="Lista de empaque", layout="wide")
-st.title("Generador de lista de empaque")
+print("⬆️ Sube tu archivo Excel")
+uploaded = files.upload()
 
-uploaded_file = st.file_uploader("Sube el archivo Excel", type=["xlsx", "xls"])
+# Leer archivo (encabezados en fila 5)
+file_name = list(uploaded.keys())[0]
+df = pd.read_excel(file_name, header=4)
 
-def generar_archivos(excel_file):
-    df = pd.read_excel(excel_file, header=4)
-    df = df.dropna(how="all").reset_index(drop=True)
+# ==============================
+# 🎯 COLUMNAS FIJAS
+# ==============================
 
-    col_venta = df.columns[0]
-    col_unidades = df.columns[6]
-    col_estado = df.columns[2]
-    col_titulo = df.columns[20]
+col_venta = df.columns[0]
+col_unidades = df.columns[6]
+col_estado = df.columns[2]
+col_titulo = df.columns[20]
+col_sku = df.columns[16]  # <-- AJUSTA SI CAMBIA, pero aquí suele estar SKU
 
-    resultado = []
-    i = 0
+df = df.dropna(how="all").reset_index(drop=True)
 
-    while i < len(df):
-        fila = df.iloc[i]
-        estado = str(fila[col_estado]).strip() if pd.notna(fila[col_estado]) else ""
-        venta_actual = "" if pd.isna(fila[col_venta]) else str(fila[col_venta])
+# ==============================
+# 🧠 PROCESAMIENTO
+# ==============================
 
-        match = re.search(r'Paquete de (\d+)', estado, re.IGNORECASE)
+resultado = []
+i = 0
 
-        if match:
-            cantidad = int(match.group(1))
-            grupo = []
+while i < len(df):
+    fila = df.iloc[i]
+    estado = str(fila[col_estado]).strip() if pd.notna(fila[col_estado]) else ""
+    venta_actual = "" if pd.isna(fila[col_venta]) else str(fila[col_venta])
 
-            for j in range(1, cantidad + 1):
-                if i + j < len(df):
-                    subfila = df.iloc[i + j]
-                    grupo.append({
-                        "Venta": "" if pd.isna(subfila[col_venta]) else str(subfila[col_venta]),
-                        "Unidades": "" if pd.isna(subfila[col_unidades]) else str(subfila[col_unidades]),
-                        "Titulo": "" if pd.isna(subfila[col_titulo]) else str(subfila[col_titulo])
-                    })
+    match = re.search(r'Paquete de (\d+)', estado, re.IGNORECASE)
 
-            resultado.append({
-                "Check": "☐",
-                "Venta principal": venta_actual,
-                "Tipo": f"JUNTO ({cantidad} productos)",
-                "Grupo": grupo
-            })
+    if match:
+        cantidad = int(match.group(1))
+        grupo = []
 
-            i += cantidad + 1
-        else:
-            resultado.append({
-                "Check": "☐",
-                "Venta principal": venta_actual,
-                "Tipo": "INDIVIDUAL",
-                "Grupo": [{
-                    "Venta": venta_actual,
-                    "Unidades": "" if pd.isna(fila[col_unidades]) else str(fila[col_unidades]),
-                    "Titulo": "" if pd.isna(fila[col_titulo]) else str(fila[col_titulo])
-                }]
-            })
-            i += 1
+        for j in range(1, cantidad + 1):
+            if i + j < len(df):
+                subfila = df.iloc[i + j]
+                grupo.append({
+                    "Venta": str(subfila[col_venta]),
+                    "Unidades": str(subfila[col_unidades]),
+                    "Titulo": str(subfila[col_titulo]),
+                    "SKU": str(subfila[col_sku])
+                })
 
-    filas_finales = []
-    for item in resultado:
-        if item["Tipo"].startswith("JUNTO"):
-            ventas_detalle = "\n".join([x["Venta"] for x in item["Grupo"]])
-            unidades = "\n".join([x["Unidades"] for x in item["Grupo"]])
-            titulos = "\n".join([x["Titulo"] for x in item["Grupo"]])
-        else:
-            ventas_detalle = item["Grupo"][0]["Venta"]
-            unidades = item["Grupo"][0]["Unidades"]
-            titulos = item["Grupo"][0]["Titulo"]
-
-        filas_finales.append({
-            "✔": item["Check"],
-            "Venta principal": item["Venta principal"],
-            "Tipo": item["Tipo"],
-            "Ventas detalle": ventas_detalle,
-            "Unidades": unidades,
-            "Productos": titulos
+        resultado.append({
+            "Check": "☐",
+            "Venta principal": venta_actual,
+            "Tipo": f"JUNTO ({cantidad} productos)",
+            "Grupo": grupo
         })
 
-    df_final = pd.DataFrame(filas_finales)
+        i += cantidad + 1
 
-    excel_buffer = io.BytesIO()
-    df_final.to_excel(excel_buffer, index=False)
-    excel_buffer.seek(0)
+    else:
+        resultado.append({
+            "Check": "☐",
+            "Venta principal": venta_actual,
+            "Tipo": "INDIVIDUAL",
+            "Grupo": [{
+                "Venta": venta_actual,
+                "Unidades": str(fila[col_unidades]),
+                "Titulo": str(fila[col_titulo]),
+                "SKU": str(fila[col_sku])
+            }]
+        })
 
-    pdf_buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        pdf_buffer,
-        pagesize=landscape(letter),
-        rightMargin=15,
-        leftMargin=15,
-        topMargin=20,
-        bottomMargin=20
-    )
+        i += 1
 
-    styles = getSampleStyleSheet()
-    style_header = ParagraphStyle(
-        name="header",
-        parent=styles["Normal"],
-        alignment=TA_CENTER,
-        fontName="Helvetica-Bold",
-        fontSize=8,
-        leading=10,
-        textColor=colors.white
-    )
-    style_cell = ParagraphStyle(
-        name="cell",
-        parent=styles["Normal"],
-        alignment=TA_LEFT,
-        fontName="Helvetica",
-        fontSize=7,
-        leading=9,
-        wordWrap="CJK"
-    )
-    style_center = ParagraphStyle(
-        name="center",
-        parent=styles["Normal"],
-        alignment=TA_CENTER,
-        fontName="Helvetica",
-        fontSize=7,
-        leading=9
-    )
+# ==============================
+# 📋 FORMATO FINAL
+# ==============================
 
-    headers = [
-        Paragraph("<b>✔</b>", style_header),
-        Paragraph("<b>Venta principal</b>", style_header),
-        Paragraph("<b>Tipo</b>", style_header),
-        Paragraph("<b>Ventas detalle</b>", style_header),
-        Paragraph("<b>Unidades</b>", style_header),
-        Paragraph("<b>Productos</b>", style_header),
-    ]
+filas_finales = []
 
-    table_data = [headers]
-    for _, row in df_final.iterrows():
-        table_data.append([
-            Paragraph(str(row["✔"]), style_center),
-            Paragraph(str(row["Venta principal"]).replace("\n", "<br/>"), style_cell),
-            Paragraph(str(row["Tipo"]).replace("\n", "<br/>"), style_cell),
-            Paragraph(str(row["Ventas detalle"]).replace("\n", "<br/>"), style_cell),
-            Paragraph(str(row["Unidades"]).replace("\n", "<br/>"), style_center),
-            Paragraph(str(row["Productos"]).replace("\n", "<br/>"), style_cell),
-        ])
+for item in resultado:
+    ventas = "\n".join([x["Venta"] for x in item["Grupo"]])
+    unidades = "\n".join([x["Unidades"] for x in item["Grupo"]])
+    titulos = "\n".join([x["Titulo"] for x in item["Grupo"]])
+    skus = "\n".join([x["SKU"] for x in item["Grupo"]])
 
-    col_widths = [0.35 * inch, 1.55 * inch, 1.45 * inch, 1.75 * inch, 0.85 * inch, 4.55 * inch]
-    table = Table(table_data, colWidths=col_widths, repeatRows=1)
+    filas_finales.append({
+        "✔": item["Check"],
+        "Venta principal": item["Venta principal"],
+        "Tipo": item["Tipo"],
+        "SKU": skus,
+        "Ventas detalle": ventas,
+        "Unidades": unidades,
+        "Productos": titulos
+    })
 
-    table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#4F81BD")),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('ALIGN', (0, 0), (0, -1), 'CENTER'),
-        ('ALIGN', (4, 1), (4, -1), 'CENTER'),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.whitesmoke, colors.lightgrey]),
-        ('LEFTPADDING', (0, 0), (-1, -1), 4),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 4),
-        ('TOPPADDING', (0, 0), (-1, -1), 4),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-    ]))
+df_final = pd.DataFrame(filas_finales)
 
-    elements = [
-        Paragraph("<b>Lista de empaque</b>", styles["Title"]),
-        Spacer(1, 8),
-        table
-    ]
-    doc.build(elements)
-    pdf_buffer.seek(0)
+# ==============================
+# 💾 EXCEL
+# ==============================
 
-    return df_final, excel_buffer, pdf_buffer
+excel_name = "lista_empaque.xlsx"
+df_final.to_excel(excel_name, index=False)
 
-if uploaded_file is not None:
-    try:
-        df_resultado, excel_out, pdf_out = generar_archivos(uploaded_file)
-        st.success("Archivo procesado correctamente")
-        st.dataframe(df_resultado, use_container_width=True)
+# ==============================
+# 📄 PDF HORIZONTAL
+# ==============================
 
-        st.download_button(
-            "Descargar Excel",
-            data=excel_out,
-            file_name="lista_empaque.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+pdf_name = "lista_empaque.pdf"
 
-        st.download_button(
-            "Descargar PDF",
-            data=pdf_out,
-            file_name="lista_empaque.pdf",
-            mime="application/pdf"
-        )
-    except Exception as e:
-        st.error(f"Error al procesar el archivo: {e}")
+doc = SimpleDocTemplate(
+    pdf_name,
+    pagesize=landscape(letter),
+    rightMargin=15,
+    leftMargin=15,
+    topMargin=20,
+    bottomMargin=20
+)
+
+styles = getSampleStyleSheet()
+
+style_header = ParagraphStyle(
+    name="header",
+    parent=styles["Normal"],
+    alignment=TA_CENTER,
+    fontName="Helvetica-Bold",
+    fontSize=8,
+    textColor=colors.white
+)
+
+style_cell = ParagraphStyle(
+    name="cell",
+    parent=styles["Normal"],
+    alignment=TA_LEFT,
+    fontSize=7,
+    wordWrap='CJK'
+)
+
+style_center = ParagraphStyle(
+    name="center",
+    parent=styles["Normal"],
+    alignment=TA_CENTER,
+    fontSize=7
+)
+
+headers = [
+    Paragraph("<b>✔</b>", style_header),
+    Paragraph("<b>Venta</b>", style_header),
+    Paragraph("<b>Tipo</b>", style_header),
+    Paragraph("<b>SKU</b>", style_header),
+    Paragraph("<b>Unidades</b>", style_header),
+    Paragraph("<b>Productos</b>", style_header),
+]
+
+table_data = [headers]
+
+for _, row in df_final.iterrows():
+    table_data.append([
+        Paragraph(str(row["✔"]), style_center),
+        Paragraph(str(row["Venta principal"]), style_cell),
+        Paragraph(str(row["Tipo"]), style_cell),
+        Paragraph(str(row["SKU"]).replace("\n", "<br/>"), style_cell),
+        Paragraph(str(row["Unidades"]).replace("\n", "<br/>"), style_center),
+        Paragraph(str(row["Productos"]).replace("\n", "<br/>"), style_cell),
+    ])
+
+col_widths = [
+    0.3 * inch,
+    1.5 * inch,
+    1.3 * inch,
+    2.0 * inch,   # SKU
+    0.8 * inch,
+    4.5 * inch
+]
+
+table = Table(table_data, colWidths=col_widths, repeatRows=1)
+
+table.setStyle(TableStyle([
+    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#4F81BD")),
+    ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+    ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+]))
+
+doc.build([table])
+
+# ==============================
+# 📥 DESCARGA
+# ==============================
+
+files.download(excel_name)
+files.download(pdf_name)
+
+print("✅ LISTO con SKU incluido")
