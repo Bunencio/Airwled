@@ -875,64 +875,45 @@ def build_main_pdf_buffer(orders: list[OrderGroup], page_label: str) -> io.Bytes
 # -----------------------------------------------------------------------------
 
 
-def build_preparation_table(items: list[PreparationItem], width: float, styles: dict[str, ParagraphStyle]) -> LongTable:
-    fixed_widths = {
-        "no": 0.42 * inch,
-        "qty": 0.92 * inch,
-        "orders": 0.95 * inch,
-        "lines": 0.95 * inch,
-        "sku": 1.55 * inch,
-    }
-    product_width = width - sum(fixed_widths.values())
+def build_preparation_table(prep_df: pd.DataFrame, width: float, styles: dict[str, ParagraphStyle]) -> Table:
     col_widths = [
-        fixed_widths["no"],
-        fixed_widths["qty"],
-        fixed_widths["orders"],
-        fixed_widths["lines"],
-        fixed_widths["sku"],
-        product_width,
+        width * 0.25,  # SKU
+        width * 0.55,  # Producto
+        width * 0.20,  # Cantidad
     ]
 
-    data: list[list[object]] = [[
-        Paragraph("#", styles["table_header"]),
-        Paragraph("Total", styles["table_header"]),
-        Paragraph("Ventas", styles["table_header"]),
-        Paragraph("Rengl.", styles["table_header"]),
-        Paragraph("SKU", styles["table_header"]),
-        Paragraph("Producto", styles["table_header"]),
-    ]]
+    data = [
+        [
+            Paragraph("SKU", styles["table_header"]),
+            Paragraph("Producto", styles["table_header"]),
+            Paragraph("Cantidad", styles["table_header"]),
+        ]
+    ]
 
-    for idx, item in enumerate(items, start=1):
+    for _, row in prep_df.iterrows():
         data.append(
             [
-                Paragraph(str(idx), styles["cell_center"]),
-                Paragraph(format_number(item.total_units), styles["cell_qty"]),
-                Paragraph(str(item.order_count), styles["cell_center"]),
-                Paragraph(str(item.line_count), styles["cell_center"]),
-                Paragraph(escape(item.sku), styles["cell_sale"]),
-                Paragraph(safe_paragraph_text(item.product_name), styles["cell_product"]),
+                Paragraph(escape(str(row["SKU"])), styles["cell_center"]),
+                Paragraph(escape(str(row["Producto"])), styles["cell_detail"]),
+                Paragraph(str(row["Cantidad"]), styles["cell_center"]),
             ]
         )
 
-    table = LongTable(data, colWidths=col_widths, repeatRows=1, splitByRow=1)
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+
     table.setStyle(
         TableStyle(
             [
-                ("BACKGROUND", (0, 0), (-1, 0), COLOR_HEADER),
-                ("TEXTCOLOR", (0, 0), (-1, 0), COLOR_WHITE),
-                ("BOX", (0, 0), (-1, -1), 0.75, COLOR_BLACK),
-                ("INNERGRID", (0, 0), (-1, -1), 0.40, COLOR_BLACK),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.black),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 5),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [COLOR_ROW, COLOR_ROW_ALT]),
+                ("ALIGN", (2, 1), (2, -1), "CENTER"),
             ]
         )
     )
-    return table
 
+    return table
 
 
 def build_preparation_pdf_buffer(preparation_items: list[PreparationItem], page_label: str) -> io.BytesIO:
