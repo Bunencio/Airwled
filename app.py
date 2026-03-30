@@ -517,48 +517,61 @@ def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[Order
         package_size = extract_package_size_from_row(row, columns)
 
         if package_size:
-            available_rows = len(df) - (i + 1)
-            rows_to_read = min(package_size, available_rows)
-            child_items: list[LineItem] = []
+            package_items: list[LineItem] = []
 
-            for offset in range(1, rows_to_read + 1):
-                child_row = df.iloc[i + offset]
-                if looks_like_header_artifact(child_row, columns):
-                    continue
-                if not has_meaningful_item_data(child_row, columns):
-                    continue
-                child_items.append(
+            # Corrección clave: muchos archivos marcan "Paquete de N" en la misma fila
+            # del primer producto. Antes esa fila se ignoraba y el paquete salía incompleto.
+            if has_meaningful_item_data(row, columns):
+                package_items.append(
                     build_line_item(
-                        sale_id=clean_value(child_row[columns.sale]) or main_sale,
-                        units_raw=child_row[columns.units],
-                        sku=child_row[columns.sku],
-                        title=child_row[columns.title],
+                        sale_id=clean_value(row[columns.sale]) or main_sale,
+                        units_raw=row[columns.units],
+                        sku=row[columns.sku],
+                        title=row[columns.title],
                     )
                 )
 
-            if child_items:
-                if available_rows < package_size:
-                    warnings.append(
-                        f"La venta '{main_sale}' indica paquete de {package_size}, pero solo hay {available_rows} fila(s) posteriores disponibles."
+            cursor = i + 1
+            while cursor < len(df) and len(package_items) < package_size:
+                candidate_row = df.iloc[cursor]
+
+                if looks_like_header_artifact(candidate_row, columns):
+                    cursor += 1
+                    continue
+
+                if not has_meaningful_item_data(candidate_row, columns):
+                    cursor += 1
+                    continue
+
+                package_items.append(
+                    build_line_item(
+                        sale_id=clean_value(candidate_row[columns.sale]) or main_sale,
+                        units_raw=candidate_row[columns.units],
+                        sku=candidate_row[columns.sku],
+                        title=candidate_row[columns.title],
                     )
-                elif len(child_items) < package_size:
+                )
+                cursor += 1
+
+            if package_items:
+                if len(package_items) < package_size:
                     warnings.append(
-                        f"La venta '{main_sale}' indica paquete de {package_size}, pero solo se pudieron consolidar {len(child_items)} artículo(s) útiles."
+                        f"La venta '{main_sale}' indica paquete de {package_size}, pero solo se pudieron consolidar {len(package_items)} artículo(s) útiles."
                     )
 
                 orders.append(
                     OrderGroup(
                         main_sale=main_sale,
-                        items=tuple(child_items),
-                        is_package_group=True,
+                        items=tuple(package_items),
+                        is_package_group=len(package_items) > 1,
                         raw_state=raw_state,
                     )
                 )
-                i += package_size + 1
+                i = cursor
                 continue
 
             warnings.append(
-                f"La venta '{main_sale}' estaba marcada como paquete, pero no se encontraron artículos hijos válidos. Se exportó como individual."
+                f"La venta '{main_sale}' estaba marcada como paquete, pero no se encontraron artículos válidos. Se exportó como individual."
             )
 
         if not has_meaningful_item_data(row, columns) and not clean_value(row[columns.sale]):
