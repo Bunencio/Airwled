@@ -1,17 +1,29 @@
+
 from __future__ import annotations
 
 import io
 import re
 import unicodedata
+import zipfile
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import BinaryIO, Iterable, Sequence
 from xml.sax.saxutils import escape
 
 import pandas as pd
-import streamlit as st
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
+try:
+    import streamlit as st
+except ModuleNotFoundError:  # pragma: no cover - permite probar la lógica sin Streamlit
+    class _StreamlitStub:
+        def __getattr__(self, name):
+            raise ModuleNotFoundError(
+                "streamlit no está instalado. Instálalo con 'pip install streamlit' para usar la interfaz."
+            )
+
+    st = _StreamlitStub()
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import legal, letter, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -19,9 +31,9 @@ from reportlab.lib.units import inch
 from reportlab.platypus import Flowable, LongTable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 
-APP_TITLE = "Generador profesional de lista de empaque"
-HEADER_ROW_INDEX = 4  # fila 5 del Excel
-PACKAGE_PATTERN = re.compile(r"paquete\s+de\s+(\d+)", re.IGNORECASE)
+APP_TITLE = "Centro profesional de empaque"
+DEFAULT_HEADER_ROW = 5  # índice humano (1-based)
+PACKAGE_PATTERN = re.compile(r"(?:paquete|pack|paq)\s*(?:de|x)?\s*(\d+)", re.IGNORECASE)
 
 PAGE_OPTIONS: dict[str, tuple[float, float]] = {
     "Carta horizontal": landscape(letter),
@@ -29,22 +41,116 @@ PAGE_OPTIONS: dict[str, tuple[float, float]] = {
 }
 
 PAGE_MARGINS = {
-    "left": 0.34 * inch,
-    "right": 0.34 * inch,
-    "top": 0.52 * inch,
-    "bottom": 0.42 * inch,
+    "left": 0.36 * inch,
+    "right": 0.36 * inch,
+    "top": 0.58 * inch,
+    "bottom": 0.48 * inch,
 }
 
-COLOR_BLACK = colors.black
-COLOR_WHITE = colors.white
-COLOR_GRAY_02 = colors.HexColor("#FAFAFA")
-COLOR_GRAY_05 = colors.HexColor("#F3F3F3")
-COLOR_GRAY_08 = colors.HexColor("#ECECEC")
-COLOR_GRAY_10 = colors.HexColor("#E2E2E2")
-COLOR_GRAY_15 = colors.HexColor("#D4D4D4")
-COLOR_GRAY_75 = colors.HexColor("#3A3A3A")
-COLOR_GRAY_85 = colors.HexColor("#222222")
-COLOR_MID = colors.HexColor("#666666")
+COLOR_TEXT = colors.HexColor("#0F172A")
+COLOR_HEADER = colors.HexColor("#111827")
+COLOR_MUTED = colors.HexColor("#64748B")
+COLOR_BORDER = colors.HexColor("#CBD5E1")
+COLOR_BORDER_DARK = colors.HexColor("#94A3B8")
+COLOR_SURFACE = colors.HexColor("#FFFFFF")
+COLOR_SURFACE_ALT = colors.HexColor("#F8FAFC")
+COLOR_PACKAGE_HEAD = colors.HexColor("#E2E8F0")
+COLOR_PACKAGE_BODY = colors.HexColor("#F8FAFC")
+COLOR_NOTE_BG = colors.HexColor("#EFF6FF")
+COLOR_WARNING_BG = colors.HexColor("#FFF7ED")
+WARNING_TEXT_HEX = "#9A3412"
+
+APP_CSS = """
+<style>
+    .stApp {
+        background: linear-gradient(180deg, #f8fafc 0%, #ffffff 62%);
+    }
+    .main .block-container {
+        max-width: 1380px;
+        padding-top: 1.2rem;
+        padding-bottom: 2rem;
+    }
+    .hero-card {
+        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+        border-radius: 24px;
+        padding: 1.35rem 1.5rem 1.25rem 1.5rem;
+        color: #ffffff;
+        box-shadow: 0 20px 40px rgba(15, 23, 42, 0.14);
+        margin-bottom: 0.9rem;
+    }
+    .hero-card h1 {
+        margin: 0 0 0.35rem 0;
+        font-size: 2rem;
+        line-height: 1.1;
+        color: #ffffff;
+    }
+    .hero-card p {
+        margin: 0;
+        color: #dbeafe;
+        font-size: 0.98rem;
+        line-height: 1.5;
+    }
+    .feature-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin: 0.35rem 0 1rem 0;
+    }
+    .feature-card {
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 18px;
+        padding: 0.95rem 1rem 0.9rem 1rem;
+        box-shadow: 0 10px 26px rgba(15, 23, 42, 0.05);
+    }
+    .feature-card h3 {
+        margin: 0 0 0.28rem 0;
+        color: #0f172a;
+        font-size: 1rem;
+    }
+    .feature-card p {
+        margin: 0;
+        color: #475569;
+        font-size: 0.92rem;
+        line-height: 1.45;
+    }
+    .subtle-note {
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 18px;
+        padding: 0.9rem 1rem;
+        margin-bottom: 0.9rem;
+        color: #334155;
+    }
+    .subtle-note strong {
+        color: #0f172a;
+    }
+    div[data-testid="stDownloadButton"] > button {
+        width: 100%;
+        border-radius: 999px;
+        border: 1px solid #cbd5e1;
+        font-weight: 700;
+        padding: 0.7rem 1rem;
+    }
+    div[data-testid="stDataFrame"] {
+        border: 1px solid #e2e8f0;
+        border-radius: 18px;
+        overflow: hidden;
+    }
+    [data-testid="stMetric"] {
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 18px;
+        padding: 0.65rem 0.9rem;
+        box-shadow: 0 8px 22px rgba(15, 23, 42, 0.04);
+    }
+    @media (max-width: 980px) {
+        .feature-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>
+"""
 
 
 @dataclass(frozen=True)
@@ -67,59 +173,105 @@ class ResolvedColumns:
 @dataclass(frozen=True)
 class LineItem:
     sale_id: str
-    units: str
+    units_raw: str
     sku: str
     title: str
+    quantity: Decimal | None
+
+    @property
+    def sku_display(self) -> str:
+        return self.sku or "SIN SKU"
+
+    @property
+    def title_display(self) -> str:
+        return self.title or "Sin descripción"
+
+    @property
+    def quantity_display(self) -> str:
+        if self.quantity is not None:
+            return format_decimal(self.quantity)
+        return self.units_raw or "-"
 
 
 @dataclass(frozen=True)
 class OrderGroup:
     main_sale: str
-    delivery_type: str
-    items: list[LineItem]
+    items: tuple[LineItem, ...]
+    is_package_group: bool
+    raw_state: str = ""
 
     @property
     def item_count(self) -> int:
         return len(self.items)
 
     @property
-    def total_units(self) -> str:
-        values: list[float] = []
-        has_non_numeric = False
-
-        for item in self.items:
-            number = to_number(item.units)
-            if number is None:
-                if clean_value(item.units):
-                    has_non_numeric = True
-                continue
-            values.append(number)
-
-        if values and not has_non_numeric:
-            total = sum(values)
-            return str(int(total)) if float(total).is_integer() else f"{total:.2f}"
-        return "-"
-
-    @property
     def short_type(self) -> str:
-        if self.delivery_type == "INDIVIDUAL":
-            return "INDIV."
-        return f"PAQ x{self.item_count}"
+        return f"PAQ x{self.item_count}" if self.is_package_group else "INDIV."
 
     @property
-    def is_package(self) -> bool:
-        return self.delivery_type != "INDIVIDUAL"
+    def delivery_type_display(self) -> str:
+        return f"PAQUETE ({self.item_count} productos)" if self.is_package_group else "INDIVIDUAL"
+
+    @property
+    def total_numeric_quantity(self) -> Decimal:
+        return sum((item.quantity or Decimal("0") for item in self.items), Decimal("0"))
+
+
+@dataclass(frozen=True)
+class PreparationEntry:
+    sku_key: str
+    sku_display: str
+    titles: tuple[str, ...]
+    total_quantity: Decimal | None
+    line_count: int
+    order_count: int
+    orders: tuple[str, ...]
+    omitted_quantity_count: int = 0
+
+    @property
+    def total_display(self) -> str:
+        if self.total_quantity is None:
+            return "-"
+        return format_decimal(self.total_quantity)
+
+    @property
+    def needs_attention(self) -> bool:
+        return self.sku_display == "SIN SKU" or self.omitted_quantity_count > 0 or self.total_quantity is None
+
+
+@dataclass
+class GeneratedOutputs:
+    summary_df: pd.DataFrame
+    packing_preview_df: pd.DataFrame
+    preparation_preview_df: pd.DataFrame
+    packing_pdf_buffer: io.BytesIO
+    preparation_pdf_buffer: io.BytesIO
+    zip_buffer: io.BytesIO
+    warnings: list[str]
+    orders: list[OrderGroup]
+    preparations: list[PreparationEntry]
+    file_names: dict[str, str]
+    generated_at_display: str
 
 
 COLUMN_RULES: tuple[ColumnRule, ...] = (
-    ColumnRule("sale", 0, ("venta", "pedido", "order", "folio")),
-    ColumnRule("state", 2, ("estado", "status")),
-    ColumnRule("units", 6, ("unidades", "cantidad", "cant", "qty")),
-    ColumnRule("sku", 16, ("sku", "codigo", "código", "asin", "referencia")),
+    ColumnRule("sale", 0, ("venta", "pedido", "order", "folio", "venta principal")),
+    ColumnRule("state", 2, ("estado", "status", "entrega", "envio", "envío")),
+    ColumnRule("units", 6, ("unidades", "cantidad", "cant", "qty", "units")),
+    ColumnRule("sku", 16, ("sku", "seller sku", "codigo", "código", "asin", "referencia")),
     ColumnRule(
         "title",
         20,
-        ("titulo", "título", "producto", "descripcion", "descripción", "articulo", "artículo"),
+        (
+            "titulo",
+            "título",
+            "producto",
+            "descripcion",
+            "descripción",
+            "articulo",
+            "artículo",
+            "titulo de la publicacion",
+        ),
     ),
 )
 
@@ -127,7 +279,7 @@ COLUMN_RULES: tuple[ColumnRule, ...] = (
 class Checkbox(Flowable):
     """Casilla vacía para marcado manual."""
 
-    def __init__(self, size: float = 9.2, stroke_width: float = 1.05) -> None:
+    def __init__(self, size: float = 9.6, stroke_width: float = 1.0) -> None:
         super().__init__()
         self.size = size
         self.stroke_width = stroke_width
@@ -140,20 +292,18 @@ class Checkbox(Flowable):
 
 
 # -----------------------------------------------------------------------------
-# UTILIDADES
+# UTILIDADES GENERALES
 # -----------------------------------------------------------------------------
 
 
 def normalize_text(value: object) -> str:
     if value is None:
         return ""
-
     text = str(value).strip()
     text = unicodedata.normalize("NFKD", text)
     text = text.encode("ascii", "ignore").decode("ascii")
     text = re.sub(r"\s+", " ", text)
     return text.lower().strip()
-
 
 
 def clean_value(value: object) -> str:
@@ -162,11 +312,14 @@ def clean_value(value: object) -> str:
     return str(value).strip()
 
 
-
-def safe_paragraph_text(value: object, default: str = "-") -> str:
-    text = clean_value(value) or default
-    return escape(text).replace("\n", "<br/>")
-
+def dedupe_preserve_order(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            ordered.append(value)
+    return ordered
 
 
 def slugify_filename(name: str) -> str:
@@ -175,31 +328,80 @@ def slugify_filename(name: str) -> str:
     return text or "archivo"
 
 
+def normalize_sku_key(value: str) -> str:
+    text = clean_value(value).upper()
+    text = re.sub(r"\s+", "", text)
+    return text or "SIN SKU"
 
-def to_number(value: object) -> float | None:
+
+def parse_quantity(value: object) -> Decimal | None:
     text = clean_value(value)
     if not text:
         return None
 
-    normalized = text.replace(",", ".")
-    normalized = re.sub(r"[^0-9.\-]", "", normalized)
-    if not normalized or normalized in {"-", ".", "-."}:
+    candidate = re.sub(r"[^0-9,\.\-]", "", text.replace(" ", ""))
+    if not candidate or candidate in {"-", ".", ",", "-.", "-,"}:
         return None
+
+    if "," in candidate and "." in candidate:
+        if candidate.rfind(",") > candidate.rfind("."):
+            candidate = candidate.replace(".", "").replace(",", ".")
+        else:
+            candidate = candidate.replace(",", "")
+    elif candidate.count(",") > 1 and "." not in candidate:
+        candidate = candidate.replace(",", "")
+    elif candidate.count(".") > 1 and "," not in candidate:
+        candidate = candidate.replace(".", "")
+    elif "," in candidate:
+        left, right = candidate.split(",", 1)
+        if len(right) == 3 and left not in {"", "-"}:
+            candidate = left + right
+        else:
+            candidate = left + "." + right
+    elif "." in candidate:
+        left, right = candidate.split(".", 1)
+        if len(right) == 3 and left not in {"", "-"}:
+            candidate = left + right
 
     try:
-        return float(normalized)
-    except ValueError:
+        return Decimal(candidate)
+    except InvalidOperation:
         return None
 
+
+def format_decimal(value: Decimal | None) -> str:
+    if value is None:
+        return "-"
+    text = format(value.normalize(), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def build_line_item(sale_id: object, units_raw: object, sku: object, title: object) -> LineItem:
+    units_clean = clean_value(units_raw)
+    return LineItem(
+        sale_id=clean_value(sale_id),
+        units_raw=units_clean,
+        sku=clean_value(sku),
+        title=clean_value(title),
+        quantity=parse_quantity(units_clean),
+    )
+
+
+def has_meaningful_item_data(row: pd.Series, columns: ResolvedColumns) -> bool:
+    return any(clean_value(row[column]) for column in (columns.sku, columns.title, columns.units))
 
 
 def looks_like_header_artifact(row: pd.Series, columns: ResolvedColumns) -> bool:
-    sale = normalize_text(row[columns.sale])
-    title = normalize_text(row[columns.title])
-    sku = normalize_text(row[columns.sku])
-    units = normalize_text(row[columns.units])
-
-    joined = " ".join(part for part in (sale, title, sku, units) if part)
+    parts = [
+        normalize_text(row[columns.sale]),
+        normalize_text(row[columns.state]),
+        normalize_text(row[columns.units]),
+        normalize_text(row[columns.sku]),
+        normalize_text(row[columns.title]),
+    ]
+    joined = " ".join(part for part in parts if part)
     if not joined:
         return True
 
@@ -207,32 +409,33 @@ def looks_like_header_artifact(row: pd.Series, columns: ResolvedColumns) -> bool
         "# de venta",
         "venta principal",
         "titulo de la publicacion",
-        "unidades x sku",
         "contenido verificado",
+        "iniciales / hora",
+        "unidades x sku",
+        "preparacion previa por sku",
+        "productos asociados",
+        "lista de empaque",
     )
     return any(marker in joined for marker in suspicious_markers)
 
 
-
-def compact_type_label(order: OrderGroup) -> str:
-    return order.short_type
-
-
-
-def build_item_line_html(item: LineItem, index: int | None = None) -> str:
-    qty = escape(item.units) if clean_value(item.units) else "-"
-    sku = escape(item.sku) if clean_value(item.sku) else "SIN SKU"
-    title = escape(item.title) if clean_value(item.title) else "Sin descripción"
-    prefix = f"{index}. " if index is not None else ""
-    return f"{prefix}{qty} x <b>{sku}</b> - {title}"
+def extract_package_size_from_row(row: pd.Series, columns: ResolvedColumns) -> int | None:
+    for candidate in (clean_value(row[columns.state]), clean_value(row[columns.title])):
+        match = PACKAGE_PATTERN.search(candidate)
+        if match:
+            return int(match.group(1))
+    return None
 
 
-
-def build_order_detail_html(order: OrderGroup) -> str:
-    lines = []
-    for idx, item in enumerate(order.items, start=1):
-        lines.append(build_item_line_html(item, idx if order.item_count > 1 else None))
-    return "<br/>".join(lines)
+def build_output_filenames(source_name: str, generated_at: datetime) -> dict[str, str]:
+    source_slug = slugify_filename(Path(source_name).stem)
+    stamp = generated_at.strftime("%Y%m%d_%H%M%S")
+    prefix = f"{source_slug}_{stamp}"
+    return {
+        "packing_pdf": f"{prefix}_lista_empaque.pdf",
+        "preparation_pdf": f"{prefix}_preparacion_sku.pdf",
+        "zip": f"{prefix}_pdfs_empaque.zip",
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -247,7 +450,6 @@ def resolve_source_columns(df: pd.DataFrame) -> tuple[ResolvedColumns, list[str]
 
     for rule in COLUMN_RULES:
         found_column = None
-
         for column_name, normalized_header in normalized_headers.items():
             if any(alias in normalized_header for alias in rule.aliases):
                 found_column = column_name
@@ -277,9 +479,16 @@ def resolve_source_columns(df: pd.DataFrame) -> tuple[ResolvedColumns, list[str]
     )
 
 
+def load_source_dataframe(excel_file: BinaryIO, header_row_number: int) -> tuple[pd.DataFrame, ResolvedColumns, list[str]]:
+    if header_row_number < 1:
+        raise ValueError("La fila del encabezado debe ser 1 o mayor.")
 
-def load_source_dataframe(excel_file: BinaryIO) -> tuple[pd.DataFrame, ResolvedColumns, list[str]]:
-    df = pd.read_excel(excel_file, header=HEADER_ROW_INDEX)
+    df = pd.read_excel(
+        excel_file,
+        header=header_row_number - 1,
+        dtype=object,
+        keep_default_na=False,
+    )
     df = df.dropna(how="all").reset_index(drop=True)
 
     if df.empty:
@@ -287,15 +496,6 @@ def load_source_dataframe(excel_file: BinaryIO) -> tuple[pd.DataFrame, ResolvedC
 
     columns, warnings = resolve_source_columns(df)
     return df, columns, warnings
-
-
-
-def extract_package_size(state_value: str) -> int | None:
-    match = PACKAGE_PATTERN.search(state_value)
-    if not match:
-        return None
-    return int(match.group(1))
-
 
 
 def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[OrderGroup], list[str]]:
@@ -312,234 +512,279 @@ def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[Order
             i += 1
             continue
 
-        state = clean_value(row[columns.state])
         main_sale = clean_value(row[columns.sale]) or f"SIN-VENTA-{i + 1}"
-        package_size = extract_package_size(state)
+        raw_state = clean_value(row[columns.state])
+        package_size = extract_package_size_from_row(row, columns)
 
         if package_size:
             available_rows = len(df) - (i + 1)
-            real_size = min(package_size, available_rows)
-            items: list[LineItem] = []
+            rows_to_read = min(package_size, available_rows)
+            child_items: list[LineItem] = []
 
-            if available_rows < package_size:
-                warnings.append(
-                    f"La venta '{main_sale}' indica 'Paquete de {package_size}', pero solo hay {available_rows} filas posteriores disponibles."
-                )
-
-            for offset in range(1, real_size + 1):
+            for offset in range(1, rows_to_read + 1):
                 child_row = df.iloc[i + offset]
                 if looks_like_header_artifact(child_row, columns):
                     continue
-                items.append(
-                    LineItem(
-                        sale_id=clean_value(child_row[columns.sale]),
-                        units=clean_value(child_row[columns.units]),
-                        sku=clean_value(child_row[columns.sku]),
-                        title=clean_value(child_row[columns.title]),
+                if not has_meaningful_item_data(child_row, columns):
+                    continue
+                child_items.append(
+                    build_line_item(
+                        sale_id=clean_value(child_row[columns.sale]) or main_sale,
+                        units_raw=child_row[columns.units],
+                        sku=child_row[columns.sku],
+                        title=child_row[columns.title],
                     )
                 )
 
-            if not items:
-                warnings.append(
-                    f"La venta '{main_sale}' estaba marcada como paquete, pero no se encontraron artículos hijos. Se exportó como individual."
-                )
-                items = [
-                    LineItem(
-                        sale_id=main_sale,
-                        units=clean_value(row[columns.units]),
-                        sku=clean_value(row[columns.sku]),
-                        title=clean_value(row[columns.title]),
+            if child_items:
+                if available_rows < package_size:
+                    warnings.append(
+                        f"La venta '{main_sale}' indica paquete de {package_size}, pero solo hay {available_rows} fila(s) posteriores disponibles."
                     )
-                ]
-                delivery_type = "INDIVIDUAL"
-                i += 1
-            else:
-                delivery_type = f"JUNTO ({len(items)} productos)"
+                elif len(child_items) < package_size:
+                    warnings.append(
+                        f"La venta '{main_sale}' indica paquete de {package_size}, pero solo se pudieron consolidar {len(child_items)} artículo(s) útiles."
+                    )
+
+                orders.append(
+                    OrderGroup(
+                        main_sale=main_sale,
+                        items=tuple(child_items),
+                        is_package_group=True,
+                        raw_state=raw_state,
+                    )
+                )
                 i += package_size + 1
+                continue
 
-            orders.append(OrderGroup(main_sale=main_sale, delivery_type=delivery_type, items=items))
+            warnings.append(
+                f"La venta '{main_sale}' estaba marcada como paquete, pero no se encontraron artículos hijos válidos. Se exportó como individual."
+            )
+
+        if not has_meaningful_item_data(row, columns) and not clean_value(row[columns.sale]):
+            i += 1
             continue
 
         orders.append(
             OrderGroup(
                 main_sale=main_sale,
-                delivery_type="INDIVIDUAL",
-                items=[
-                    LineItem(
+                items=(
+                    build_line_item(
                         sale_id=main_sale,
-                        units=clean_value(row[columns.units]),
-                        sku=clean_value(row[columns.sku]),
-                        title=clean_value(row[columns.title]),
-                    )
-                ],
+                        units_raw=row[columns.units],
+                        sku=row[columns.sku],
+                        title=row[columns.title],
+                    ),
+                ),
+                is_package_group=False,
+                raw_state=raw_state,
             )
         )
         i += 1
 
     if skipped_artifacts:
-        warnings.append(f"Se omitieron {skipped_artifacts} fila(s) que parecían encabezados o texto auxiliar dentro del Excel.")
+        warnings.append(
+            f"Se omitieron {skipped_artifacts} fila(s) que parecían encabezados, texto auxiliar o filas completamente vacías dentro del Excel."
+        )
 
     return orders, warnings
 
 
 # -----------------------------------------------------------------------------
-# DATAFRAMES DE SALIDA
+# CONSOLIDACIÓN POR SKU Y VISTAS PREVIAS
 # -----------------------------------------------------------------------------
 
 
-def build_control_dataframe(orders: Iterable[OrderGroup]) -> pd.DataFrame:
-    rows = []
+def build_preparation_entries(orders: Iterable[OrderGroup]) -> tuple[list[PreparationEntry], list[str]]:
+    grouped: dict[str, dict[str, object]] = {}
+    omitted_examples: list[str] = []
+    missing_sku_lines = 0
+
     for order in orders:
-        rows.append(
-            {
-                "OK": "",
-                "Iniciales / Hora": "",
-                "Venta principal": order.main_sale,
-                "Tipo": order.delivery_type,
-                "Artículos": order.item_count,
-                "Unidades totales": order.total_units,
-                "Detalle": "\n".join(
-                    f"{item.units or '-'} x {item.sku or 'SIN SKU'} - {item.title or 'Sin descripción'}"
-                    for item in order.items
-                ),
-            }
+        for item in order.items:
+            sku_key = normalize_sku_key(item.sku)
+            if sku_key == "SIN SKU":
+                missing_sku_lines += 1
+
+            if sku_key not in grouped:
+                grouped[sku_key] = {
+                    "sku_display": item.sku_display,
+                    "title_counter": Counter(),
+                    "line_count": 0,
+                    "orders": [],
+                    "orders_seen": set(),
+                    "total_quantity": Decimal("0"),
+                    "has_numeric": False,
+                    "omitted_quantity_count": 0,
+                }
+
+            entry = grouped[sku_key]
+            title_counter = entry["title_counter"]
+            assert isinstance(title_counter, Counter)
+            title_counter[item.title_display] += 1
+
+            entry["line_count"] = int(entry["line_count"]) + 1
+
+            orders_seen = entry["orders_seen"]
+            assert isinstance(orders_seen, set)
+            if order.main_sale not in orders_seen:
+                orders_seen.add(order.main_sale)
+                orders_list = entry["orders"]
+                assert isinstance(orders_list, list)
+                orders_list.append(order.main_sale)
+
+            if item.quantity is None:
+                entry["omitted_quantity_count"] = int(entry["omitted_quantity_count"]) + 1
+                if item.units_raw:
+                    omitted_examples.append(
+                        f"SKU {item.sku_display} en venta {order.main_sale}: cantidad '{item.units_raw}' no se pudo sumar al consolidado."
+                    )
+                continue
+
+            entry["has_numeric"] = True
+            entry["total_quantity"] = Decimal(entry["total_quantity"]) + item.quantity
+
+    preparation_entries: list[PreparationEntry] = []
+    for sku_key, raw in grouped.items():
+        title_counter = raw["title_counter"]
+        assert isinstance(title_counter, Counter)
+        titles = tuple(title for title, _ in title_counter.most_common())
+        orders_list = raw["orders"]
+        assert isinstance(orders_list, list)
+        has_numeric = bool(raw["has_numeric"])
+        total_quantity = Decimal(raw["total_quantity"]) if has_numeric else None
+
+        preparation_entries.append(
+            PreparationEntry(
+                sku_key=sku_key,
+                sku_display=str(raw["sku_display"]),
+                titles=titles,
+                total_quantity=total_quantity,
+                line_count=int(raw["line_count"]),
+                order_count=len(orders_list),
+                orders=tuple(orders_list),
+                omitted_quantity_count=int(raw["omitted_quantity_count"]),
+            )
         )
-    return pd.DataFrame(rows)
+
+    preparation_entries.sort(
+        key=lambda entry: (
+            entry.sku_display == "SIN SKU",
+            entry.total_quantity is None,
+            -(entry.total_quantity or Decimal("0")),
+            entry.sku_display,
+        )
+    )
+
+    warnings: list[str] = []
+    omitted_count = sum(entry.omitted_quantity_count for entry in preparation_entries)
+    if omitted_count:
+        warnings.append(
+            f"Se omitieron {omitted_count} cantidad(es) no numéricas al consolidar el PDF de preparación por SKU."
+        )
+        warnings.extend(omitted_examples[:12])
+        if len(omitted_examples) > 12:
+            warnings.append(f"Hay {len(omitted_examples) - 12} caso(s) adicional(es) con cantidades no numéricas omitidas.")
+
+    if missing_sku_lines:
+        warnings.append(
+            f"Se detectaron {missing_sku_lines} línea(s) sin SKU. Se agruparon como 'SIN SKU' en el PDF de preparación; conviene revisarlas manualmente."
+        )
+
+    return preparation_entries, warnings
 
 
+def build_summary_dataframe(orders: list[OrderGroup], preparations: list[PreparationEntry]) -> pd.DataFrame:
+    package_count = sum(1 for order in orders if order.is_package_group)
+    individual_count = len(orders) - package_count
+    total_lines = sum(order.item_count for order in orders)
+    total_numeric_units = sum((order.total_numeric_quantity for order in orders), Decimal("0"))
+    omitted_in_preparation = sum(entry.omitted_quantity_count for entry in preparations)
+    lines_without_sku = sum(1 for order in orders for item in order.items if item.sku_display == "SIN SKU")
+    preparation_total = sum((entry.total_quantity or Decimal("0") for entry in preparations), Decimal("0"))
 
-def build_detail_dataframe(orders: Iterable[OrderGroup]) -> pd.DataFrame:
-    rows = []
-    for order in orders:
-        for idx, item in enumerate(order.items, start=1):
+    return pd.DataFrame(
+        [
+            {"Métrica": "Total de entregas", "Valor": str(len(orders))},
+            {"Métrica": "Pedidos individuales", "Valor": str(individual_count)},
+            {"Métrica": "Paquetes", "Valor": str(package_count)},
+            {"Métrica": "Líneas de producto", "Valor": str(total_lines)},
+            {"Métrica": "SKU únicos para preparación", "Valor": str(len(preparations))},
+            {"Métrica": "Unidades numéricas detectadas", "Valor": format_decimal(total_numeric_units)},
+            {"Métrica": "Unidades totales a preparar", "Valor": format_decimal(preparation_total)},
+            {"Métrica": "Líneas sin SKU", "Valor": str(lines_without_sku)},
+            {"Métrica": "Cantidades omitidas del consolidado", "Valor": str(omitted_in_preparation)},
+        ]
+    )
+
+
+def build_packing_preview_dataframe(orders: Iterable[OrderGroup]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for order_number, order in enumerate(orders, start=1):
+        for item_index, item in enumerate(order.items, start=1):
             rows.append(
                 {
-                    "Venta principal": order.main_sale,
-                    "Tipo": order.delivery_type,
-                    "Renglón": idx,
-                    "Venta hijo": item.sale_id,
-                    "Unidades": item.units,
-                    "SKU": item.sku,
-                    "Producto": item.title,
+                    "No.": order_number if item_index == 1 else "",
+                    "OK": "☐" if item_index == 1 else "",
+                    "Venta principal": order.main_sale if item_index == 1 else "",
+                    "Tipo": order.short_type if item_index == 1 else "",
+                    "SKU": item.sku_display,
+                    "Producto": f"{item_index}. {item.title_display}" if order.item_count > 1 else item.title_display,
+                    "Cantidad": item.quantity_display,
                 }
             )
     return pd.DataFrame(rows)
 
 
-
-def build_summary_dataframe(orders: Iterable[OrderGroup]) -> pd.DataFrame:
-    order_list = list(orders)
-    grouped_count = sum(1 for order in order_list if order.is_package)
-    individual_count = len(order_list) - grouped_count
-    product_lines = sum(order.item_count for order in order_list)
-    numeric_unit_values = [to_number(order.total_units) for order in order_list]
-    total_units = sum(value for value in numeric_unit_values if value is not None)
-
-    return pd.DataFrame(
-        [
-            {"Métrica": "Total de entregas", "Valor": len(order_list)},
-            {"Métrica": "Individuales", "Valor": individual_count},
-            {"Métrica": "Paquetes", "Valor": grouped_count},
-            {"Métrica": "Líneas de producto", "Valor": product_lines},
-            {"Métrica": "Unidades numéricas detectadas", "Valor": int(total_units) if float(total_units).is_integer() else total_units},
-        ]
-    )
-
-
-# -----------------------------------------------------------------------------
-# EXPORTACIÓN EXCEL
-# -----------------------------------------------------------------------------
-
-
-def apply_sheet_formatting(ws, preferred_widths: dict[str, int], freeze_panes: str) -> None:
-    ws.freeze_panes = freeze_panes
-    header_fill = PatternFill(fill_type="solid", start_color="D9D9D9", end_color="D9D9D9")
-    border = Border(
-        left=Side(style="thin", color="000000"),
-        right=Side(style="thin", color="000000"),
-        top=Side(style="thin", color="000000"),
-        bottom=Side(style="thin", color="000000"),
-    )
-
-    for cell in ws[1]:
-        cell.fill = header_fill
-        cell.font = Font(bold=True)
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        cell.border = border
-
-    for row in ws.iter_rows(min_row=2):
-        max_lines = 1
-        for cell in row:
-            cell.alignment = Alignment(wrap_text=True, vertical="top")
-            cell.border = border
-            line_count = str(cell.value or "").count("\n") + 1
-            max_lines = max(max_lines, line_count)
-        ws.row_dimensions[row[0].row].height = max(20, min(16 * max_lines, 92))
-
-    for idx in range(1, ws.max_column + 1):
-        letter_code = get_column_letter(idx)
-        ws.column_dimensions[letter_code].width = preferred_widths.get(letter_code, 18)
-
-
-
-def build_excel_buffer(summary_df: pd.DataFrame, control_df: pd.DataFrame, detail_df: pd.DataFrame) -> io.BytesIO:
-    buffer = io.BytesIO()
-
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        summary_df.to_excel(writer, index=False, sheet_name="Resumen")
-        control_df.to_excel(writer, index=False, sheet_name="Control")
-        detail_df.to_excel(writer, index=False, sheet_name="Detalle")
-
-        apply_sheet_formatting(writer.sheets["Resumen"], {"A": 34, "B": 18}, "A2")
-        apply_sheet_formatting(
-            writer.sheets["Control"],
-            {"A": 10, "B": 16, "C": 22, "D": 18, "E": 10, "F": 14, "G": 72},
-            "A2",
+def build_preparation_preview_dataframe(entries: Iterable[PreparationEntry]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for entry in entries:
+        rows.append(
+            {
+                "SKU": entry.sku_display,
+                "Productos asociados": "\n".join(entry.titles) if entry.titles else "Sin descripción",
+                "Total unidades": entry.total_display,
+                "Líneas": entry.line_count,
+                "Ventas": entry.order_count,
+                "Ventas principales": ", ".join(entry.orders),
+                "Cantidades omitidas": entry.omitted_quantity_count,
+            }
         )
-        apply_sheet_formatting(
-            writer.sheets["Detalle"],
-            {"A": 22, "B": 18, "C": 10, "D": 18, "E": 12, "F": 22, "G": 72},
-            "A2",
-        )
-
-    buffer.seek(0)
-    return buffer
+    return pd.DataFrame(rows)
 
 
 # -----------------------------------------------------------------------------
-# ESTILOS PDF
+# ESTILOS Y BLOQUES PDF
 # -----------------------------------------------------------------------------
 
 
 def build_styles() -> dict[str, ParagraphStyle]:
     sample = getSampleStyleSheet()
-
     return {
         "title": ParagraphStyle(
             "TitleMain",
             parent=sample["Title"],
             fontName="Helvetica-Bold",
-            fontSize=16,
-            leading=18,
-            textColor=COLOR_BLACK,
-            spaceAfter=2,
+            fontSize=16.4,
+            leading=18.6,
+            textColor=COLOR_TEXT,
+            spaceAfter=1,
         ),
         "subtitle": ParagraphStyle(
             "Subtitle",
             parent=sample["BodyText"],
             fontName="Helvetica",
-            fontSize=8.2,
-            leading=10,
-            textColor=COLOR_MID,
-            spaceAfter=0,
+            fontSize=8.4,
+            leading=10.4,
+            textColor=COLOR_MUTED,
         ),
         "meta": ParagraphStyle(
             "Meta",
             parent=sample["BodyText"],
             fontName="Helvetica",
-            fontSize=7.7,
-            leading=9.2,
-            textColor=COLOR_BLACK,
+            fontSize=7.5,
+            leading=9.1,
+            textColor=COLOR_TEXT,
             alignment=2,
         ),
         "metric_label": ParagraphStyle(
@@ -547,86 +792,87 @@ def build_styles() -> dict[str, ParagraphStyle]:
             parent=sample["BodyText"],
             fontName="Helvetica-Bold",
             fontSize=6.5,
-            leading=8,
-            textColor=COLOR_BLACK,
+            leading=7.8,
+            textColor=COLOR_MUTED,
         ),
         "metric_value": ParagraphStyle(
             "MetricValue",
             parent=sample["BodyText"],
             fontName="Helvetica-Bold",
-            fontSize=12.6,
-            leading=14,
-            textColor=COLOR_BLACK,
+            fontSize=12.8,
+            leading=14.4,
+            textColor=COLOR_TEXT,
         ),
-        "instruction": ParagraphStyle(
-            "Instruction",
+        "note": ParagraphStyle(
+            "Note",
             parent=sample["BodyText"],
             fontName="Helvetica",
-            fontSize=7.2,
-            leading=8.6,
-            textColor=COLOR_BLACK,
+            fontSize=7.25,
+            leading=8.9,
+            textColor=COLOR_TEXT,
         ),
         "table_header": ParagraphStyle(
             "TableHeader",
             parent=sample["BodyText"],
             fontName="Helvetica-Bold",
-            fontSize=7.9,
-            leading=9.2,
-            textColor=COLOR_WHITE,
+            fontSize=7.8,
+            leading=9.3,
+            textColor=colors.white,
             alignment=1,
         ),
         "cell_center": ParagraphStyle(
             "CellCenter",
             parent=sample["BodyText"],
             fontName="Helvetica-Bold",
-            fontSize=7.6,
+            fontSize=7.2,
             leading=8.8,
-            textColor=COLOR_BLACK,
+            textColor=COLOR_TEXT,
             alignment=1,
         ),
         "cell_sale": ParagraphStyle(
             "CellSale",
             parent=sample["BodyText"],
             fontName="Helvetica-Bold",
-            fontSize=7.6,
+            fontSize=7.2,
             leading=8.8,
-            textColor=COLOR_BLACK,
+            textColor=COLOR_TEXT,
         ),
         "cell_type": ParagraphStyle(
             "CellType",
             parent=sample["BodyText"],
             fontName="Helvetica-Bold",
-            fontSize=7.5,
-            leading=8.8,
-            textColor=COLOR_BLACK,
+            fontSize=7.0,
+            leading=8.6,
+            textColor=COLOR_TEXT,
             alignment=1,
         ),
-        "cell_hint": ParagraphStyle(
-            "CellHint",
+        "cell_sku": ParagraphStyle(
+            "CellSKU",
             parent=sample["BodyText"],
-            fontName="Helvetica",
-            fontSize=5.7,
-            leading=6.8,
-            textColor=COLOR_MID,
-            alignment=1,
+            fontName="Helvetica-Bold",
+            fontSize=7.1,
+            leading=8.7,
+            textColor=COLOR_TEXT,
         ),
-        "cell_detail": ParagraphStyle(
-            "CellDetail",
+        "cell_product": ParagraphStyle(
+            "CellProduct",
             parent=sample["BodyText"],
             fontName="Helvetica",
-            fontSize=7.45,
-            leading=8.95,
-            textColor=COLOR_BLACK,
+            fontSize=7.2,
+            leading=9.0,
+            textColor=COLOR_TEXT,
             splitLongWords=True,
-            allowWidows=1,
-            allowOrphans=1,
+        ),
+        "cell_qty": ParagraphStyle(
+            "CellQty",
+            parent=sample["BodyText"],
+            fontName="Helvetica-Bold",
+            fontSize=7.3,
+            leading=8.8,
+            textColor=COLOR_TEXT,
+            alignment=1,
         ),
     }
-
-
-# -----------------------------------------------------------------------------
-# CONSTRUCCIÓN PDF
-# -----------------------------------------------------------------------------
 
 
 def make_metric_box(label: str, value: str, width: float, styles: dict[str, ParagraphStyle]) -> Table:
@@ -640,10 +886,10 @@ def make_metric_box(label: str, value: str, width: float, styles: dict[str, Para
     table.setStyle(
         TableStyle(
             [
-                ("BACKGROUND", (0, 0), (-1, -1), COLOR_WHITE),
-                ("BOX", (0, 0), (-1, -1), 0.9, COLOR_BLACK),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("BACKGROUND", (0, 0), (-1, -1), COLOR_SURFACE),
+                ("BOX", (0, 0), (-1, -1), 0.9, COLOR_BORDER_DARK),
+                ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 7),
                 ("TOPPADDING", (0, 0), (-1, -1), 4),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
@@ -653,31 +899,34 @@ def make_metric_box(label: str, value: str, width: float, styles: dict[str, Para
     return table
 
 
-
 def build_intro_block(
-    orders: list[OrderGroup],
+    *,
+    title: str,
+    subtitle: str,
+    source_name: str,
+    page_label: str,
+    generated_at_display: str,
+    metric_pairs: list[tuple[str, str]],
+    note_html: str,
     styles: dict[str, ParagraphStyle],
     doc_width: float,
-    page_label: str,
-) -> list:
-    grouped_count = sum(1 for order in orders if order.is_package)
-    individual_count = len(orders) - grouped_count
-    product_lines = sum(order.item_count for order in orders)
-    generated_at = datetime.now().strftime("%d/%m/%Y %H:%M")
-
-    title_table = Table(
+    note_bg: colors.Color = COLOR_NOTE_BG,
+) -> list[object]:
+    top_table = Table(
         [
             [
-                Paragraph("Lista de empaque", styles["title"]),
+                Paragraph(escape(title), styles["title"]),
                 Paragraph(
-                    f"<b>Generado:</b> {generated_at}<br/><b>Formato:</b> {escape(page_label)}<br/><b>Diseño:</b> horizontal compacto",
+                    f"<b>Generado:</b> {escape(generated_at_display)}<br/>"
+                    f"<b>Fuente:</b> {escape(source_name)}<br/>"
+                    f"<b>Formato:</b> {escape(page_label)}",
                     styles["meta"],
                 ),
             ]
         ],
         colWidths=[doc_width * 0.68, doc_width * 0.32],
     )
-    title_table.setStyle(
+    top_table.setStyle(
         TableStyle(
             [
                 ("LEFTPADDING", (0, 0), (-1, -1), 0),
@@ -689,24 +938,16 @@ def build_intro_block(
         )
     )
 
-    summary_widths = [doc_width * 0.13, doc_width * 0.13, doc_width * 0.13, doc_width * 0.13, doc_width * 0.48]
-    summary_table = Table(
-        [
-            [
-                make_metric_box("Entregas", str(len(orders)), summary_widths[0], styles),
-                make_metric_box("Individuales", str(individual_count), summary_widths[1], styles),
-                make_metric_box("Paquetes", str(grouped_count), summary_widths[2], styles),
-                make_metric_box("Líneas", str(product_lines), summary_widths[3], styles),
-                make_metric_box("Control", "1 casilla + iniciales/hora por venta", summary_widths[4], styles),
-            ]
-        ],
-        colWidths=summary_widths,
+    metric_width = doc_width / max(len(metric_pairs), 1)
+    metrics_table = Table(
+        [[make_metric_box(label, value, metric_width - 6, styles) for label, value in metric_pairs]],
+        colWidths=[metric_width] * len(metric_pairs),
     )
-    summary_table.setStyle(
+    metrics_table.setStyle(
         TableStyle(
             [
                 ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
                 ("TOPPADDING", (0, 0), (-1, -1), 0),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -714,146 +955,240 @@ def build_intro_block(
         )
     )
 
-    instruction_table = Table(
-        [[
-            Paragraph(
-                "<b>Uso:</b> validar venta y contenido, marcar la casilla al terminar y escribir iniciales u hora. "
-                "<b>Clave:</b> INDIV. = individual, PAQ xN = entrega conjunta.",
-                styles["instruction"],
-            )
-        ]],
-        colWidths=[doc_width],
-    )
-    instruction_table.setStyle(
+    note_table = Table([[Paragraph(note_html, styles["note"])]], colWidths=[doc_width])
+    note_table.setStyle(
         TableStyle(
             [
-                ("BACKGROUND", (0, 0), (-1, -1), COLOR_GRAY_08),
-                ("BOX", (0, 0), (-1, -1), 0.8, COLOR_BLACK),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("BACKGROUND", (0, 0), (-1, -1), note_bg),
+                ("BOX", (0, 0), (-1, -1), 0.85, COLOR_BORDER),
+                ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
             ]
         )
     )
 
     return [
-        title_table,
-        Paragraph(
-            "Documento preparado para impresión en blanco y negro con densidad alta, control manual claro y mejor aprovechamiento de hoja.",
-            styles["subtitle"],
-        ),
-        Spacer(1, 5),
-        summary_table,
-        Spacer(1, 5),
-        instruction_table,
+        top_table,
+        Paragraph(escape(subtitle), styles["subtitle"]),
         Spacer(1, 6),
+        metrics_table,
+        Spacer(1, 6),
+        note_table,
+        Spacer(1, 8),
     ]
 
 
+def make_page_decorator(header_label: str, footer_label: str, generated_at_display: str):
+    def decorator(canvas, doc) -> None:
+        page_width, page_height = doc.pagesize
+        canvas.saveState()
+        canvas.setStrokeColor(COLOR_BORDER_DARK)
+        canvas.setFillColor(COLOR_TEXT)
+        canvas.setLineWidth(0.75)
+        canvas.line(doc.leftMargin, page_height - 0.28 * inch, page_width - doc.rightMargin, page_height - 0.28 * inch)
 
-def build_orders_table(orders: list[OrderGroup], width: float, styles: dict[str, ParagraphStyle]) -> LongTable:
+        canvas.setFont("Helvetica-Bold", 8.7)
+        canvas.drawString(doc.leftMargin, page_height - 0.21 * inch, header_label.upper())
+
+        canvas.setFont("Helvetica", 7.8)
+        canvas.drawRightString(page_width - doc.rightMargin, page_height - 0.21 * inch, f"Pagina {canvas.getPageNumber()}")
+
+        canvas.setLineWidth(0.55)
+        canvas.line(doc.leftMargin, 0.30 * inch, page_width - doc.rightMargin, 0.30 * inch)
+        canvas.setFont("Helvetica", 7.0)
+        canvas.drawString(doc.leftMargin, 0.16 * inch, footer_label)
+        canvas.drawRightString(page_width - doc.rightMargin, 0.16 * inch, generated_at_display)
+        canvas.restoreState()
+
+    return decorator
+
+
+def build_packing_table(orders: list[OrderGroup], width: float, styles: dict[str, ParagraphStyle]) -> LongTable:
     fixed_widths = {
-        "no": 0.40 * inch,
+        "number": 0.40 * inch,
         "ok": 0.48 * inch,
-        "mark": 1.02 * inch,
-        "sale": 1.52 * inch,
-        "type": 0.92 * inch,
-        "items": 0.54 * inch,
+        "sale": 1.46 * inch,
+        "type": 0.90 * inch,
+        "sku": 1.42 * inch,
+        "qty": 0.74 * inch,
     }
-    detail_width = width - sum(fixed_widths.values())
+    product_width = width - sum(fixed_widths.values())
     col_widths = [
-        fixed_widths["no"],
+        fixed_widths["number"],
         fixed_widths["ok"],
-        fixed_widths["mark"],
         fixed_widths["sale"],
         fixed_widths["type"],
-        fixed_widths["items"],
-        detail_width,
+        fixed_widths["sku"],
+        product_width,
+        fixed_widths["qty"],
     ]
 
     data: list[list[object]] = [
         [
             Paragraph("No.", styles["table_header"]),
             Paragraph("OK", styles["table_header"]),
-            Paragraph("Iniciales / hora", styles["table_header"]),
             Paragraph("Venta principal", styles["table_header"]),
             Paragraph("Tipo", styles["table_header"]),
-            Paragraph("Art.", styles["table_header"]),
-            Paragraph("Contenido verificado", styles["table_header"]),
+            Paragraph("SKU", styles["table_header"]),
+            Paragraph("Producto", styles["table_header"]),
+            Paragraph("Cant.", styles["table_header"]),
         ]
     ]
 
     style_commands: list[tuple] = [
-        ("BACKGROUND", (0, 0), (-1, 0), COLOR_GRAY_85),
-        ("TEXTCOLOR", (0, 0), (-1, 0), COLOR_WHITE),
-        ("BOX", (0, 0), (-1, -1), 0.75, COLOR_BLACK),
-        ("INNERGRID", (0, 0), (-1, -1), 0.45, COLOR_BLACK),
+        ("BACKGROUND", (0, 0), (-1, 0), COLOR_HEADER),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("BOX", (0, 0), (-1, -1), 0.75, COLOR_BORDER_DARK),
+        ("INNERGRID", (0, 0), (-1, -1), 0.35, COLOR_BORDER),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("LEFTPADDING", (0, 0), (-1, -1), 5),
         ("RIGHTPADDING", (0, 0), (-1, -1), 5),
         ("TOPPADDING", (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ("ALIGN", (0, 0), (5, -1), "CENTER"),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [COLOR_WHITE, COLOR_GRAY_05]),
+        ("ALIGN", (0, 0), (1, -1), "CENTER"),
+        ("ALIGN", (3, 1), (3, -1), "CENTER"),
+        ("ALIGN", (6, 1), (6, -1), "CENTER"),
     ]
 
-    for row_index, order in enumerate(orders, start=1):
-        initials_cell = Paragraph("__________<br/><font size='5.6'>inic. / hora</font>", styles["cell_hint"])
-        data.append(
-            [
-                Paragraph(str(row_index), styles["cell_center"]),
-                Checkbox(9.2),
-                initials_cell,
-                Paragraph(escape(order.main_sale), styles["cell_sale"]),
-                Paragraph(escape(compact_type_label(order)), styles["cell_type"]),
-                Paragraph(str(order.item_count), styles["cell_center"]),
-                Paragraph(build_order_detail_html(order), styles["cell_detail"]),
-            ]
-        )
-
-        if order.is_package:
-            style_commands.extend(
+    for order_number, order in enumerate(orders, start=1):
+        for item_index, item in enumerate(order.items, start=1):
+            product_text = f"{item_index}. {item.title_display}" if order.item_count > 1 else item.title_display
+            data.append(
                 [
-                    ("BACKGROUND", (4, row_index), (5, row_index), COLOR_GRAY_10),
-                    ("FONTNAME", (4, row_index), (5, row_index), "Helvetica-Bold"),
+                    Paragraph(str(order_number), styles["cell_center"]) if item_index == 1 else "",
+                    Checkbox(9.6) if item_index == 1 else "",
+                    Paragraph(escape(order.main_sale), styles["cell_sale"]) if item_index == 1 else "",
+                    Paragraph(escape(order.short_type), styles["cell_type"]) if item_index == 1 else "",
+                    Paragraph(escape(item.sku_display), styles["cell_sku"]),
+                    Paragraph(escape(product_text), styles["cell_product"]),
+                    Paragraph(escape(item.quantity_display), styles["cell_qty"]),
                 ]
             )
+            row_idx = len(data) - 1
+
+            if order.is_package_group:
+                background = COLOR_PACKAGE_HEAD if item_index == 1 else COLOR_PACKAGE_BODY
+            else:
+                background = COLOR_SURFACE if order_number % 2 else COLOR_SURFACE_ALT
+
+            style_commands.append(("BACKGROUND", (0, row_idx), (-1, row_idx), background))
+
+            if item_index == 1:
+                style_commands.append(("LINEABOVE", (0, row_idx), (-1, row_idx), 0.65, COLOR_BORDER_DARK))
+            if item_index == order.item_count:
+                style_commands.append(("LINEBELOW", (0, row_idx), (-1, row_idx), 0.55, COLOR_BORDER))
 
     table = LongTable(data, colWidths=col_widths, repeatRows=1, splitByRow=1)
     table.setStyle(TableStyle(style_commands))
     return table
 
 
+def build_preparation_product_html(entry: PreparationEntry) -> str:
+    if entry.titles:
+        visible_titles = list(entry.titles[:3])
+        html = "<br/>".join(escape(title) for title in visible_titles)
+    else:
+        html = "Sin descripción"
 
-def draw_page_decoration(canvas, doc) -> None:
-    page_width, page_height = doc.pagesize
-    canvas.saveState()
-    canvas.setStrokeColor(COLOR_BLACK)
-    canvas.setLineWidth(0.7)
-    canvas.line(doc.leftMargin, page_height - 0.28 * inch, page_width - doc.rightMargin, page_height - 0.28 * inch)
+    notes: list[str] = []
+    extra_titles = max(len(entry.titles) - 3, 0)
+    if extra_titles:
+        notes.append(f"+ {extra_titles} nombre(s) adicional(es)")
+    if entry.omitted_quantity_count:
+        notes.append(f"{entry.omitted_quantity_count} cantidad(es) omitida(s) del total")
+    if entry.sku_display == "SIN SKU":
+        notes.append("Revisar: línea(s) sin SKU")
+    if entry.total_quantity is None:
+        notes.append("Sin cantidad numérica utilizable")
 
-    canvas.setFont("Helvetica-Bold", 8.6)
-    canvas.drawString(doc.leftMargin, page_height - 0.21 * inch, "LISTA DE EMPAQUE")
-
-    canvas.setFont("Helvetica", 8)
-    canvas.drawRightString(page_width - doc.rightMargin, page_height - 0.21 * inch, f"Página {canvas.getPageNumber()}")
-
-    canvas.setLineWidth(0.5)
-    canvas.line(doc.leftMargin, 0.30 * inch, page_width - doc.rightMargin, 0.30 * inch)
-    canvas.setFont("Helvetica", 7.2)
-    canvas.drawString(doc.leftMargin, 0.16 * inch, "Formato horizontal compacto para control operativo")
-    canvas.drawRightString(page_width - doc.rightMargin, 0.16 * inch, datetime.now().strftime("%d/%m/%Y %H:%M"))
-    canvas.restoreState()
+    if notes:
+        html += f"<br/><font size='6.1' color='{WARNING_TEXT_HEX}'>{escape(' - '.join(notes))}</font>"
+    return html
 
 
+def build_preparation_table(entries: list[PreparationEntry], width: float, styles: dict[str, ParagraphStyle]) -> LongTable:
+    fixed_widths = {
+        "number": 0.42 * inch,
+        "sku": 1.72 * inch,
+        "total": 0.96 * inch,
+        "lines": 0.68 * inch,
+        "sales": 0.78 * inch,
+    }
+    products_width = width - sum(fixed_widths.values())
+    col_widths = [
+        fixed_widths["number"],
+        fixed_widths["sku"],
+        products_width,
+        fixed_widths["total"],
+        fixed_widths["lines"],
+        fixed_widths["sales"],
+    ]
 
-def build_pdf_buffer(orders: list[OrderGroup], page_label: str) -> io.BytesIO:
-    buffer = io.BytesIO()
+    data: list[list[object]] = [
+        [
+            Paragraph("No.", styles["table_header"]),
+            Paragraph("SKU", styles["table_header"]),
+            Paragraph("Producto(s) asociados", styles["table_header"]),
+            Paragraph("Total unid.", styles["table_header"]),
+            Paragraph("Líneas", styles["table_header"]),
+            Paragraph("Ventas", styles["table_header"]),
+        ]
+    ]
+
+    style_commands: list[tuple] = [
+        ("BACKGROUND", (0, 0), (-1, 0), COLOR_HEADER),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("BOX", (0, 0), (-1, -1), 0.75, COLOR_BORDER_DARK),
+        ("INNERGRID", (0, 0), (-1, -1), 0.35, COLOR_BORDER),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("ALIGN", (0, 1), (0, -1), "CENTER"),
+        ("ALIGN", (3, 1), (5, -1), "CENTER"),
+    ]
+
+    for row_number, entry in enumerate(entries, start=1):
+        data.append(
+            [
+                Paragraph(str(row_number), styles["cell_center"]),
+                Paragraph(escape(entry.sku_display), styles["cell_sku"]),
+                Paragraph(build_preparation_product_html(entry), styles["cell_product"]),
+                Paragraph(escape(entry.total_display), styles["cell_qty"]),
+                Paragraph(str(entry.line_count), styles["cell_center"]),
+                Paragraph(str(entry.order_count), styles["cell_center"]),
+            ]
+        )
+        row_idx = len(data) - 1
+        background = COLOR_WARNING_BG if entry.needs_attention else (COLOR_SURFACE if row_number % 2 else COLOR_SURFACE_ALT)
+        style_commands.append(("BACKGROUND", (0, row_idx), (-1, row_idx), background))
+
+    table = LongTable(data, colWidths=col_widths, repeatRows=1, splitByRow=1)
+    table.setStyle(TableStyle(style_commands))
+    return table
+
+
+# -----------------------------------------------------------------------------
+# GENERACIÓN DE PDFS
+# -----------------------------------------------------------------------------
+
+
+def build_packing_pdf_buffer(
+    orders: list[OrderGroup],
+    source_name: str,
+    page_label: str,
+    generated_at_display: str,
+) -> io.BytesIO:
     styles = build_styles()
     page_size = PAGE_OPTIONS[page_label]
+    package_count = sum(1 for order in orders if order.is_package_group)
+    total_lines = sum(order.item_count for order in orders)
+    total_units = sum((order.total_numeric_quantity for order in orders), Decimal("0"))
 
+    buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer,
         pagesize=page_size,
@@ -861,15 +1196,127 @@ def build_pdf_buffer(orders: list[OrderGroup], page_label: str) -> io.BytesIO:
         rightMargin=PAGE_MARGINS["right"],
         topMargin=PAGE_MARGINS["top"],
         bottomMargin=PAGE_MARGINS["bottom"],
-        title="Lista de empaque horizontal compacta",
+        title="Lista de empaque operativa",
         author="OpenAI",
     )
 
     elements: list[object] = []
-    elements.extend(build_intro_block(orders, styles, doc.width, page_label))
-    elements.append(build_orders_table(orders, doc.width, styles))
+    elements.extend(
+        build_intro_block(
+            title="Lista de empaque operativa",
+            subtitle="Producto y cantidad separados por columna, con paquetes desplegados en renglones consecutivos.",
+            source_name=source_name,
+            page_label=page_label,
+            generated_at_display=generated_at_display,
+            metric_pairs=[
+                ("Entregas", str(len(orders))),
+                ("Paquetes", str(package_count)),
+                ("Líneas", str(total_lines)),
+                ("Unidades", format_decimal(total_units)),
+            ],
+            note_html=(
+                "<b>Lectura rápida:</b> cada línea muestra un SKU específico con su <b>producto</b> y <b>cantidad</b> en columnas separadas. "
+                "En los paquetes se deja una sola casilla OK por venta y los productos quedan debajo de la misma venta para que no se confundan. "
+                "Se eliminó completamente la columna de iniciales / hora."
+            ),
+            styles=styles,
+            doc_width=doc.width,
+            note_bg=COLOR_NOTE_BG,
+        )
+    )
+    elements.append(build_packing_table(orders, doc.width, styles))
 
-    doc.build(elements, onFirstPage=draw_page_decoration, onLaterPages=draw_page_decoration)
+    decorator = make_page_decorator(
+        header_label="Lista de empaque operativa",
+        footer_label="Control manual por venta con SKU, producto y cantidad separados",
+        generated_at_display=generated_at_display,
+    )
+    doc.build(elements, onFirstPage=decorator, onLaterPages=decorator)
+    buffer.seek(0)
+    return buffer
+
+
+def build_preparation_pdf_buffer(
+    preparations: list[PreparationEntry],
+    orders: list[OrderGroup],
+    source_name: str,
+    page_label: str,
+    generated_at_display: str,
+) -> io.BytesIO:
+    styles = build_styles()
+    page_size = PAGE_OPTIONS[page_label]
+    preparation_total = sum((entry.total_quantity or Decimal("0") for entry in preparations), Decimal("0"))
+    total_lines = sum(entry.line_count for entry in preparations)
+    order_coverage = len({order.main_sale for order in orders})
+    omitted_count = sum(entry.omitted_quantity_count for entry in preparations)
+    missing_sku_entries = sum(1 for entry in preparations if entry.sku_display == "SIN SKU")
+
+    note_color = COLOR_WARNING_BG if (omitted_count or missing_sku_entries) else COLOR_NOTE_BG
+    note_text = (
+        "<b>Objetivo:</b> este documento le dice al empleado qué debe preparar antes de empezar a empacar. "
+        "Todo está consolidado estrictamente por <b>SKU</b>, así que si el mismo SKU aparece repetido en varios paquetes o ventas, "
+        "aquí sale sumado en un solo renglón. El nombre del producto es solo una referencia visual."
+    )
+    if omitted_count or missing_sku_entries:
+        note_text += (
+            f"<br/><font color='{WARNING_TEXT_HEX}'><b>Atención:</b> cantidades omitidas del consolidado: {omitted_count}. "
+            f"SKU vacíos agrupados como 'SIN SKU': {missing_sku_entries}.</font>"
+        )
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=page_size,
+        leftMargin=PAGE_MARGINS["left"],
+        rightMargin=PAGE_MARGINS["right"],
+        topMargin=PAGE_MARGINS["top"],
+        bottomMargin=PAGE_MARGINS["bottom"],
+        title="Preparación previa por SKU",
+        author="OpenAI",
+    )
+
+    elements: list[object] = []
+    elements.extend(
+        build_intro_block(
+            title="Preparación previa por SKU",
+            subtitle="Totales consolidados para surtir antes de empezar a empacar.",
+            source_name=source_name,
+            page_label=page_label,
+            generated_at_display=generated_at_display,
+            metric_pairs=[
+                ("SKU únicos", str(len(preparations))),
+                ("Unidades", format_decimal(preparation_total)),
+                ("Líneas", str(total_lines)),
+                ("Ventas", str(order_coverage)),
+            ],
+            note_html=note_text,
+            styles=styles,
+            doc_width=doc.width,
+            note_bg=note_color,
+        )
+    )
+    elements.append(build_preparation_table(preparations, doc.width, styles))
+
+    decorator = make_page_decorator(
+        header_label="Preparación previa por SKU",
+        footer_label="Totales consolidados por SKU para surtido previo al empaque",
+        generated_at_display=generated_at_display,
+    )
+    doc.build(elements, onFirstPage=decorator, onLaterPages=decorator)
+    buffer.seek(0)
+    return buffer
+
+
+def build_zip_buffer(
+    *,
+    packing_pdf_buffer: io.BytesIO,
+    preparation_pdf_buffer: io.BytesIO,
+    file_names: dict[str, str],
+) -> io.BytesIO:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(file_names["packing_pdf"], packing_pdf_buffer.getvalue())
+        archive.writestr(file_names["preparation_pdf"], preparation_pdf_buffer.getvalue())
     buffer.seek(0)
     return buffer
 
@@ -879,24 +1326,64 @@ def build_pdf_buffer(orders: list[OrderGroup], page_label: str) -> io.BytesIO:
 # -----------------------------------------------------------------------------
 
 
-def generate_files(
-    excel_file: BinaryIO,
+def generate_outputs(
+    *,
+    excel_bytes: bytes,
+    source_name: str,
     page_label: str,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, io.BytesIO, io.BytesIO, list[str], list[OrderGroup]]:
-    source_df, columns, warnings = load_source_dataframe(excel_file)
+    header_row_number: int,
+) -> GeneratedOutputs:
+    generated_at = datetime.now()
+    generated_at_display = generated_at.strftime("%d/%m/%Y %H:%M")
+    file_names = build_output_filenames(source_name, generated_at)
+
+    source_df, columns, warnings = load_source_dataframe(io.BytesIO(excel_bytes), header_row_number)
     orders, parse_warnings = parse_orders(source_df, columns)
     warnings.extend(parse_warnings)
 
     if not orders:
         raise ValueError("No se encontraron ventas válidas para exportar.")
 
-    summary_df = build_summary_dataframe(orders)
-    control_df = build_control_dataframe(orders)
-    detail_df = build_detail_dataframe(orders)
-    excel_buffer = build_excel_buffer(summary_df, control_df, detail_df)
-    pdf_buffer = build_pdf_buffer(orders, page_label)
+    preparations, preparation_warnings = build_preparation_entries(orders)
+    warnings.extend(preparation_warnings)
+    warnings = dedupe_preserve_order(warnings)
 
-    return summary_df, control_df, detail_df, excel_buffer, pdf_buffer, warnings, orders
+    summary_df = build_summary_dataframe(orders, preparations)
+    packing_preview_df = build_packing_preview_dataframe(orders)
+    preparation_preview_df = build_preparation_preview_dataframe(preparations)
+
+    packing_pdf_buffer = build_packing_pdf_buffer(
+        orders=orders,
+        source_name=source_name,
+        page_label=page_label,
+        generated_at_display=generated_at_display,
+    )
+    preparation_pdf_buffer = build_preparation_pdf_buffer(
+        preparations=preparations,
+        orders=orders,
+        source_name=source_name,
+        page_label=page_label,
+        generated_at_display=generated_at_display,
+    )
+    zip_buffer = build_zip_buffer(
+        packing_pdf_buffer=packing_pdf_buffer,
+        preparation_pdf_buffer=preparation_pdf_buffer,
+        file_names=file_names,
+    )
+
+    return GeneratedOutputs(
+        summary_df=summary_df,
+        packing_preview_df=packing_preview_df,
+        preparation_preview_df=preparation_preview_df,
+        packing_pdf_buffer=packing_pdf_buffer,
+        preparation_pdf_buffer=preparation_pdf_buffer,
+        zip_buffer=zip_buffer,
+        warnings=warnings,
+        orders=orders,
+        preparations=preparations,
+        file_names=file_names,
+        generated_at_display=generated_at_display,
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -904,107 +1391,160 @@ def generate_files(
 # -----------------------------------------------------------------------------
 
 
-def render_metrics(orders: list[OrderGroup]) -> None:
-    total_orders = len(orders)
-    grouped_orders = sum(1 for order in orders if order.is_package)
-    individual_orders = total_orders - grouped_orders
-    total_lines = sum(order.item_count for order in orders)
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Entregas", total_orders)
-    col2.metric("Individuales", individual_orders)
-    col3.metric("Paquetes", grouped_orders)
-    col4.metric("Líneas de producto", total_lines)
+def inject_css() -> None:
+    st.markdown(APP_CSS, unsafe_allow_html=True)
 
 
+def render_header() -> None:
+    st.markdown(
+        f"""
+        <div class="hero-card">
+            <h1>{APP_TITLE}</h1>
+            <p>
+                Convierte tu Excel en dos PDFs operativos: una <strong>lista de empaque limpia</strong> con SKU, producto y cantidad separados,
+                y una <strong>preparación previa por SKU</strong> para que el empleado deje surtido todo antes de empezar a empacar.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-def render_downloads(excel_buffer: io.BytesIO, pdf_buffer: io.BytesIO) -> None:
-    col1, col2 = st.columns(2)
+    st.markdown(
+        """
+        <div class="feature-grid">
+            <div class="feature-card">
+                <h3>PDF 1 · Empaque claro</h3>
+                <p>Quita la columna de iniciales / hora y separa producto y cantidad para que no se vea raro ni se preste a confusión.</p>
+            </div>
+            <div class="feature-card">
+                <h3>PDF 2 · Preparación por SKU</h3>
+                <p>Suma automáticamente los SKU repetidos aunque estén en distintos paquetes para que el empleado prepare todo antes de empacar.</p>
+            </div>
+            <div class="feature-card">
+                <h3>Parser robusto</h3>
+                <p>Respeta paquetes, detecta columnas por nombre o por posición de respaldo, preserva SKU con ceros a la izquierda y muestra advertencias útiles.</p>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        """
+        <div class="subtle-note">
+            <strong>Tip:</strong> deja la fila de encabezado en <strong>5</strong> si tu archivo sigue el mismo formato del sistema actual.
+            Si cambia la plantilla, ajusta la fila desde las opciones avanzadas y el generador seguirá funcionando.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_metrics(outputs: GeneratedOutputs) -> None:
+    package_count = sum(1 for order in outputs.orders if order.is_package_group)
+    total_lines = sum(order.item_count for order in outputs.orders)
+    total_units = sum((entry.total_quantity or Decimal("0") for entry in outputs.preparations), Decimal("0"))
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Entregas", len(outputs.orders))
+    col2.metric("Paquetes", package_count)
+    col3.metric("Líneas", total_lines)
+    col4.metric("SKU únicos", len(outputs.preparations))
+    col5.metric("Unidades a preparar", format_decimal(total_units))
+
+
+def render_downloads(outputs: GeneratedOutputs) -> None:
+    col1, col2, col3 = st.columns(3)
 
     with col1:
         st.download_button(
-            label="Descargar Excel",
-            data=excel_buffer.getvalue(),
-            file_name="lista_empaque_horizontal.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            label="Descargar PDF de empaque",
+            data=outputs.packing_pdf_buffer.getvalue(),
+            file_name=outputs.file_names["packing_pdf"],
+            mime="application/pdf",
             use_container_width=True,
         )
 
     with col2:
         st.download_button(
-            label="Descargar PDF",
-            data=pdf_buffer.getvalue(),
-            file_name="lista_empaque_horizontal.pdf",
+            label="Descargar PDF de preparación SKU",
+            data=outputs.preparation_pdf_buffer.getvalue(),
+            file_name=outputs.file_names["preparation_pdf"],
             mime="application/pdf",
             use_container_width=True,
         )
 
+    with col3:
+        st.download_button(
+            label="Descargar ZIP con ambos PDFs",
+            data=outputs.zip_buffer.getvalue(),
+            file_name=outputs.file_names["zip"],
+            mime="application/zip",
+            use_container_width=True,
+        )
 
 
 def main() -> None:
-    st.set_page_config(page_title="Lista de empaque horizontal", layout="wide")
+    st.set_page_config(page_title="Empaque profesional", layout="wide")
+    inject_css()
+    render_header()
 
-    st.title(APP_TITLE)
-    st.caption(
-        "Sube tu Excel y genera una lista de empaque horizontal, más compacta y pensada para meter más entregas por página sin sacrificar legibilidad."
-    )
-
-    with st.container(border=True):
-        st.markdown(
-            """
-            **Qué cambia en esta versión horizontal**
-
-            - Aprovecha mejor el ancho de la hoja para reducir páginas.
-            - Consolida el control manual en **1 casilla OK + Iniciales / hora** por venta.
-            - Mantiene legibilidad alta en blanco y negro.
-            - Repite encabezados en cada página y resalta paquetes sin saturar el diseño.
-            """
-        )
-
-    col_a, col_b = st.columns([1.3, 1])
-    with col_a:
+    controls_left, controls_right = st.columns([1.3, 1])
+    with controls_left:
         page_label = st.radio(
             "Formato PDF",
             list(PAGE_OPTIONS.keys()),
             index=0,
             horizontal=True,
-            help="Carta horizontal es la opción más compatible. Oficio horizontal mete aún más entregas por hoja si tu impresora lo soporta.",
+            help="Carta horizontal suele ser la opción más compatible. Oficio horizontal aprovecha aún más ancho si tu impresora lo soporta.",
         )
-    with col_b:
-        st.markdown("**Recomendación:** usa *Carta horizontal* si imprimes en equipos estándar.")
+    with controls_right:
+        with st.expander("Opciones avanzadas", expanded=False):
+            header_row_number = st.number_input(
+                "Fila del encabezado en Excel",
+                min_value=1,
+                max_value=50,
+                value=DEFAULT_HEADER_ROW,
+                step=1,
+                help="Usa 5 si tus encabezados empiezan en la fila 5. El valor es humano: 1 = primera fila del archivo.",
+            )
 
     uploaded_file = st.file_uploader("Sube el archivo Excel", type=["xlsx", "xls"])
 
     if uploaded_file is None:
-        st.info("Esperando archivo Excel para procesar.")
+        st.info("Sube tu archivo Excel para generar los dos PDFs profesionales.")
         return
 
     try:
-        with st.spinner("Procesando archivo y generando PDF horizontal compacto..."):
-            summary_df, control_df, detail_df, excel_buffer, pdf_buffer, warnings, orders = generate_files(
-                uploaded_file,
-                page_label,
+        with st.spinner("Procesando archivo, separando producto/cantidad y construyendo los dos PDFs..."):
+            outputs = generate_outputs(
+                excel_bytes=uploaded_file.getvalue(),
+                source_name=uploaded_file.name,
+                page_label=page_label,
+                header_row_number=int(header_row_number),
             )
 
-        st.success("Archivo procesado correctamente.")
-        render_metrics(orders)
+        st.success("Listo. Se generaron la lista de empaque y el PDF de preparación por SKU.")
+        render_metrics(outputs)
 
-        if warnings:
-            with st.expander("Ver advertencias de lectura"):
-                for warning in warnings:
+        if outputs.warnings:
+            with st.expander("Ver advertencias de lectura y consolidación", expanded=False):
+                for warning in outputs.warnings:
                     st.warning(warning)
 
-        tab1, tab2, tab3 = st.tabs(["Control", "Detalle", "Descargas"])
+        tabs = st.tabs(["Vista empaque", "Vista preparación SKU", "Resumen y descargas"])
 
-        with tab1:
-            st.dataframe(control_df, use_container_width=True, height=430)
+        with tabs[0]:
+            st.caption("Producto y cantidad ya aparecen en columnas separadas. Los paquetes quedan desplegados por renglón bajo la misma venta.")
+            st.dataframe(outputs.packing_preview_df, use_container_width=True, height=540, hide_index=True)
 
-        with tab2:
-            st.dataframe(detail_df, use_container_width=True, height=430)
+        with tabs[1]:
+            st.caption("Consolidado por SKU para preparar mercancía antes de empacar. Si un SKU aparece en varios paquetes, aquí ya está sumado.")
+            st.dataframe(outputs.preparation_preview_df, use_container_width=True, height=540, hide_index=True)
 
-        with tab3:
-            st.dataframe(summary_df, use_container_width=True, height=220)
-            render_downloads(excel_buffer, pdf_buffer)
+        with tabs[2]:
+            st.dataframe(outputs.summary_df, use_container_width=True, height=320, hide_index=True)
+            render_downloads(outputs)
 
     except Exception as error:
         st.error(f"Error al procesar el archivo: {error}")
