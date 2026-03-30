@@ -29,7 +29,7 @@ from reportlab.platypus import (
 # CONFIGURACION GENERAL
 # =============================================================================
 
-APP_TITLE = "Generador profesional de lista de empaque"
+APP_TITLE = "2.0 Generador profesional de lista de empaque"
 HEADER_ROW_INDEX = 4  # Fila 5 de Excel
 PACKAGE_PATTERN = re.compile(r"paquete\s+de\s+(\d+)", re.IGNORECASE)
 
