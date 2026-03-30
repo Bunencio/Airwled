@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import io
@@ -12,7 +11,7 @@ import pandas as pd
 
 try:
     import streamlit as st
-except ImportError:  # permite probar la logica sin Streamlit
+except ImportError:  # permite probar la lógica sin Streamlit
     st = None
 
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -34,7 +33,7 @@ from reportlab.platypus import (
 )
 
 # -----------------------------------------------------------------------------
-# Configuracion general
+# Configuración general
 # -----------------------------------------------------------------------------
 
 APP_TITLE = "Generador profesional de lista de empaque"
@@ -47,20 +46,21 @@ DEFAULT_COLUMN_INDEXES = {
     "titulo": 20,
 }
 
-# Escala neutra para impresion a blanco y negro
+# Escala neutra para impresión a blanco y negro
 BLACK = colors.HexColor("#111111")
-DARK_GRAY = colors.HexColor("#2D2D2D")
-MID_GRAY = colors.HexColor("#6B6B6B")
-LIGHT_GRAY = colors.HexColor("#D9D9D9")
-VERY_LIGHT_GRAY = colors.HexColor("#F3F3F3")
+DARK_GRAY = colors.HexColor("#2B2B2B")
+MID_GRAY = colors.HexColor("#666666")
+LIGHT_GRAY = colors.HexColor("#D7D7D7")
+SOFT_GRAY = colors.HexColor("#ECECEC")
+VERY_LIGHT_GRAY = colors.HexColor("#F7F7F7")
 WHITE = colors.white
 
 PAGE_SIZE = landscape(letter)
 PAGE_MARGINS = {
-    "left": 0.45 * inch,
-    "right": 0.45 * inch,
-    "top": 0.55 * inch,
-    "bottom": 0.50 * inch,
+    "left": 0.42 * inch,
+    "right": 0.42 * inch,
+    "top": 0.52 * inch,
+    "bottom": 0.48 * inch,
 }
 
 
@@ -79,7 +79,7 @@ class ProductLine:
     def contenido_linea(self) -> str:
         cantidad = self.unidades or "-"
         sku = self.sku or "SIN SKU"
-        titulo = self.titulo or "SIN TITULO"
+        titulo = self.titulo or "SIN TÍTULO"
         return f"{cantidad} x {sku} - {titulo}"
 
 
@@ -167,10 +167,7 @@ def line_from_row(row: pd.Series, columns: dict[str, str]) -> ProductLine:
 
 
 def parse_packing_tasks(df: pd.DataFrame) -> ParseResult:
-    cols = {
-        key: df.columns[idx]
-        for key, idx in DEFAULT_COLUMN_INDEXES.items()
-    }
+    cols = {key: df.columns[idx] for key, idx in DEFAULT_COLUMN_INDEXES.items()}
 
     tasks: list[PackingTask] = []
     warnings: list[str] = []
@@ -236,6 +233,7 @@ def tasks_to_dataframe(tasks: Sequence[PackingTask]) -> pd.DataFrame:
             {
                 "No.": task.numero,
                 "Hecho": "",
+                "Terminado": "",
                 "Iniciales / Hora": "",
                 "Venta principal": task.venta_principal,
                 "Tipo": task.tipo,
@@ -257,21 +255,22 @@ def build_excel_bytes(df_final: pd.DataFrame) -> io.BytesIO:
         workbook = writer.book
         worksheet = writer.sheets["Lista empaque"]
 
-        header_fill = PatternFill(fill_type="solid", fgColor="1F1F1F")
-        header_font = Font(color="FFFFFF", bold=True)
+        header_fill = PatternFill(fill_type="solid", fgColor="202020")
+        header_font = Font(color="FFFFFF", bold=True, size=12)
         thin = Side(style="thin", color="000000")
         medium = Side(style="medium", color="000000")
 
         column_widths = {
             "A": 8,
             "B": 12,
-            "C": 18,
-            "D": 20,
-            "E": 18,
-            "F": 24,
-            "G": 12,
-            "H": 48,
-            "I": 60,
+            "C": 14,
+            "D": 18,
+            "E": 20,
+            "F": 18,
+            "G": 24,
+            "H": 12,
+            "I": 48,
+            "J": 60,
         }
 
         for cell in worksheet[1]:
@@ -287,14 +286,26 @@ def build_excel_bytes(df_final: pd.DataFrame) -> io.BytesIO:
         worksheet.auto_filter.ref = worksheet.dimensions
 
         for row_idx, row in enumerate(worksheet.iter_rows(min_row=2), start=2):
-            fill_color = "FFFFFF" if row_idx % 2 == 0 else "F2F2F2"
+            fill_color = "FFFFFF" if row_idx % 2 == 0 else "F4F4F4"
             for cell in row:
                 cell.fill = PatternFill(fill_type="solid", fgColor=fill_color)
-                cell.alignment = Alignment(vertical="top", wrap_text=True)
+                cell.alignment = Alignment(vertical="center", wrap_text=True)
                 cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+                cell.font = Font(name="Calibri", size=12)
+
+            # SKU(s) en negritas -> columna G
+            worksheet[f"G{row_idx}"].font = Font(name="Calibri", size=12, bold=True)
+
+            # Columnas de control más centradas
+            for control_col in ("A", "B", "C", "D", "H"):
+                worksheet[f"{control_col}{row_idx}"].alignment = Alignment(
+                    horizontal="center",
+                    vertical="center",
+                    wrap_text=True,
+                )
 
         for row_idx in range(2, worksheet.max_row + 1):
-            worksheet.row_dimensions[row_idx].height = 34
+            worksheet.row_dimensions[row_idx].height = 40
 
         workbook.properties.creator = "OpenAI - Generador profesional de lista de empaque"
         workbook.properties.title = "Lista de empaque"
@@ -308,7 +319,7 @@ def build_excel_bytes(df_final: pd.DataFrame) -> io.BytesIO:
 # -----------------------------------------------------------------------------
 
 class CheckBox(Flowable):
-    def __init__(self, size: float = 12):
+    def __init__(self, size: float = 14):
         super().__init__()
         self.size = size
         self.width = size
@@ -319,15 +330,15 @@ class CheckBox(Flowable):
 
     def draw(self) -> None:
         self.canv.setStrokeColor(BLACK)
-        self.canv.setLineWidth(1.1)
-        self.canv.rect(0, 0, self.size, self.size)
+        self.canv.setLineWidth(1.2)
+        self.canv.roundRect(0, 0, self.size, self.size, 1.8, stroke=1, fill=0)
 
 
 class SignatureLine(Flowable):
-    def __init__(self, width: float = 42, label: str = "Iniciales / hora"):
+    def __init__(self, width: float = 54, label: str = "Iniciales / hora"):
         super().__init__()
         self.width = width
-        self.height = 16
+        self.height = 18
         self.label = label
 
     def wrap(self, available_width: float, available_height: float) -> tuple[float, float]:
@@ -335,11 +346,12 @@ class SignatureLine(Flowable):
 
     def draw(self) -> None:
         self.canv.setStrokeColor(BLACK)
-        self.canv.setLineWidth(0.8)
-        self.canv.line(0, 11, self.width, 11)
-        self.canv.setFont("Helvetica", 5.8)
+        self.canv.setLineWidth(0.9)
+        self.canv.line(0, 12, self.width, 12)
+        self.canv.setFont("Helvetica", 6.6)
         self.canv.setFillColor(MID_GRAY)
-        self.canv.drawCentredString(self.width / 2, 1.5, self.label)
+        self.canv.drawCentredString(self.width / 2, 2, self.label)
+
 
 
 def build_styles() -> dict[str, ParagraphStyle]:
@@ -350,8 +362,8 @@ def build_styles() -> dict[str, ParagraphStyle]:
             "TitlePacking",
             parent=base_styles["Title"],
             fontName="Helvetica-Bold",
-            fontSize=18,
-            leading=21,
+            fontSize=20,
+            leading=23,
             textColor=BLACK,
             alignment=TA_LEFT,
             spaceAfter=4,
@@ -360,8 +372,8 @@ def build_styles() -> dict[str, ParagraphStyle]:
             "SubtitlePacking",
             parent=base_styles["Normal"],
             fontName="Helvetica",
-            fontSize=8.6,
-            leading=10.5,
+            fontSize=10,
+            leading=12,
             textColor=MID_GRAY,
             alignment=TA_LEFT,
         ),
@@ -369,8 +381,8 @@ def build_styles() -> dict[str, ParagraphStyle]:
             "MetricLabel",
             parent=base_styles["Normal"],
             fontName="Helvetica-Bold",
-            fontSize=7.5,
-            leading=9,
+            fontSize=8.4,
+            leading=10,
             textColor=DARK_GRAY,
             alignment=TA_CENTER,
         ),
@@ -378,8 +390,8 @@ def build_styles() -> dict[str, ParagraphStyle]:
             "MetricValue",
             parent=base_styles["Normal"],
             fontName="Helvetica-Bold",
-            fontSize=15,
-            leading=16,
+            fontSize=16.5,
+            leading=18,
             textColor=BLACK,
             alignment=TA_CENTER,
         ),
@@ -387,8 +399,8 @@ def build_styles() -> dict[str, ParagraphStyle]:
             "Helper",
             parent=base_styles["Normal"],
             fontName="Helvetica",
-            fontSize=8.2,
-            leading=10,
+            fontSize=9.4,
+            leading=11.8,
             textColor=BLACK,
             alignment=TA_LEFT,
         ),
@@ -396,8 +408,8 @@ def build_styles() -> dict[str, ParagraphStyle]:
             "HeaderCell",
             parent=base_styles["Normal"],
             fontName="Helvetica-Bold",
-            fontSize=9.2,
-            leading=10.5,
+            fontSize=10.4,
+            leading=12.2,
             textColor=WHITE,
             alignment=TA_CENTER,
         ),
@@ -405,8 +417,8 @@ def build_styles() -> dict[str, ParagraphStyle]:
             "BodyCell",
             parent=base_styles["Normal"],
             fontName="Helvetica",
-            fontSize=9.0,
-            leading=11.2,
+            fontSize=10.4,
+            leading=13.0,
             textColor=BLACK,
             alignment=TA_LEFT,
         ),
@@ -414,8 +426,8 @@ def build_styles() -> dict[str, ParagraphStyle]:
             "BodyCenter",
             parent=base_styles["Normal"],
             fontName="Helvetica",
-            fontSize=9.0,
-            leading=11.2,
+            fontSize=10.2,
+            leading=12.6,
             textColor=BLACK,
             alignment=TA_CENTER,
         ),
@@ -423,12 +435,13 @@ def build_styles() -> dict[str, ParagraphStyle]:
             "BodyBold",
             parent=base_styles["Normal"],
             fontName="Helvetica-Bold",
-            fontSize=9.2,
-            leading=11.4,
+            fontSize=10.4,
+            leading=13.0,
             textColor=BLACK,
             alignment=TA_LEFT,
         ),
     }
+
 
 
 def metric_card(label: str, value: str, styles: dict[str, ParagraphStyle]) -> Table:
@@ -437,8 +450,8 @@ def metric_card(label: str, value: str, styles: dict[str, ParagraphStyle]) -> Ta
             [Paragraph(label, styles["metric_label"])],
             [Paragraph(value, styles["metric_value"])],
         ],
-        colWidths=[1.48 * inch],
-        rowHeights=[0.28 * inch, 0.42 * inch],
+        colWidths=[1.58 * inch],
+        rowHeights=[0.30 * inch, 0.45 * inch],
     )
     table.setStyle(
         TableStyle(
@@ -458,6 +471,7 @@ def metric_card(label: str, value: str, styles: dict[str, ParagraphStyle]) -> Ta
     return table
 
 
+
 def build_summary_table(tasks: Sequence[PackingTask], styles: dict[str, ParagraphStyle]) -> Table:
     total = len(tasks)
     paquetes = sum(task.es_paquete for task in tasks)
@@ -469,7 +483,7 @@ def build_summary_table(tasks: Sequence[PackingTask], styles: dict[str, Paragrap
             metric_card("INDIVIDUALES", str(individuales), styles),
             metric_card("PAQUETES", str(paquetes), styles),
         ]],
-        colWidths=[1.58 * inch, 1.58 * inch, 1.58 * inch],
+        colWidths=[1.66 * inch, 1.66 * inch, 1.66 * inch],
     )
     summary.setStyle(
         TableStyle(
@@ -485,10 +499,12 @@ def build_summary_table(tasks: Sequence[PackingTask], styles: dict[str, Paragrap
     return summary
 
 
+
 def build_help_box(styles: dict[str, ParagraphStyle], content_width: float) -> Table:
     text = (
-        "<b>Uso sugerido:</b> 1) validar venta y contenido, 2) marcar la casilla al completar, "
-        "3) escribir iniciales u hora para dejar evidencia, 4) revisar cantidades antes de entregar."
+        "<b>Uso sugerido:</b> 1) validar venta y contenido, 2) marcar <b>HECHO</b> al preparar, "
+        "3) marcar <b>TERMINADO</b> al cerrar la tarea, 4) escribir iniciales u hora, "
+        "5) revisar cantidades y SKU antes de entregar."
     )
     table = Table([[Paragraph(text, styles["helper"])]], colWidths=[content_width])
     table.setStyle(
@@ -496,14 +512,15 @@ def build_help_box(styles: dict[str, ParagraphStyle], content_width: float) -> T
             [
                 ("BACKGROUND", (0, 0), (-1, -1), VERY_LIGHT_GRAY),
                 ("BOX", (0, 0), (-1, -1), 0.9, BLACK),
-                ("LEFTPADDING", (0, 0), (-1, -1), 8),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-                ("TOPPADDING", (0, 0), (-1, -1), 6),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("LEFTPADDING", (0, 0), (-1, -1), 9),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 9),
+                ("TOPPADDING", (0, 0), (-1, -1), 7),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
             ]
         )
     )
     return table
+
 
 
 def build_table_rows(tasks: Sequence[PackingTask], styles: dict[str, ParagraphStyle]) -> list[list[object]]:
@@ -511,6 +528,7 @@ def build_table_rows(tasks: Sequence[PackingTask], styles: dict[str, ParagraphSt
         [
             Paragraph("No.", styles["header"]),
             Paragraph("Hecho", styles["header"]),
+            Paragraph("Terminado", styles["header"]),
             Paragraph("Iniciales / Hora", styles["header"]),
             Paragraph("Venta principal", styles["header"]),
             Paragraph("Tipo", styles["header"]),
@@ -522,16 +540,17 @@ def build_table_rows(tasks: Sequence[PackingTask], styles: dict[str, ParagraphSt
         body_lines: list[str] = []
         for line in task.grupo:
             line_html = (
-                f"<b>{escape(line.unidades or '-')} x</b> "
-                f"{escape(line.sku or 'SIN SKU')} - {escape(line.titulo or 'SIN TITULO')}"
+                f"{escape(line.unidades or '-')} x <b>{escape(line.sku or 'SIN SKU')}</b> - "
+                f"{escape(line.titulo or 'SIN TÍTULO')}"
             )
             body_lines.append(line_html)
 
         rows.append(
             [
                 Paragraph(str(task.numero), styles["body_center"]),
-                CheckBox(size=11.5),
-                SignatureLine(width=54),
+                CheckBox(size=14),
+                CheckBox(size=14),
+                SignatureLine(width=60),
                 Paragraph(html_lines(task.venta_principal), styles["body"]),
                 Paragraph(html_lines(task.tipo), styles["body_bold"]),
                 Paragraph("<br/>".join(body_lines), styles["body"]),
@@ -540,16 +559,16 @@ def build_table_rows(tasks: Sequence[PackingTask], styles: dict[str, ParagraphSt
     return rows
 
 
+
 def draw_page_chrome(canvas, doc) -> None:
     page_width, page_height = PAGE_SIZE
     canvas.saveState()
 
-    # encabezado
     canvas.setStrokeColor(BLACK)
     canvas.setLineWidth(1.0)
     canvas.line(doc.leftMargin, page_height - 18, page_width - doc.rightMargin, page_height - 18)
 
-    canvas.setFont("Helvetica-Bold", 9)
+    canvas.setFont("Helvetica-Bold", 9.5)
     canvas.setFillColor(BLACK)
     canvas.drawString(doc.leftMargin, page_height - 13, "LISTA DE EMPAQUE")
 
@@ -558,19 +577,19 @@ def draw_page_chrome(canvas, doc) -> None:
     canvas.drawRightString(
         page_width - doc.rightMargin,
         page_height - 13,
-        f"Pagina {canvas.getPageNumber()}",
+        f"Página {canvas.getPageNumber()}",
     )
 
-    # pie
     canvas.setLineWidth(0.6)
     canvas.setStrokeColor(LIGHT_GRAY)
     canvas.line(doc.leftMargin, 22, page_width - doc.rightMargin, 22)
-    canvas.setFont("Helvetica", 7)
+    canvas.setFont("Helvetica", 7.2)
     canvas.setFillColor(MID_GRAY)
-    canvas.drawString(doc.leftMargin, 10, "Formato optimizado para impresion en blanco y negro")
+    canvas.drawString(doc.leftMargin, 10, "Formato optimizado para lectura rápida e impresión en blanco y negro")
     canvas.drawRightString(page_width - doc.rightMargin, 10, getattr(doc, "generated_at", ""))
 
     canvas.restoreState()
+
 
 
 def build_pdf_bytes(tasks: Sequence[PackingTask]) -> io.BytesIO:
@@ -602,8 +621,8 @@ def build_pdf_bytes(tasks: Sequence[PackingTask]) -> io.BytesIO:
     story: list[object] = [
         Paragraph("Lista de empaque", styles["title"]),
         Paragraph(
-            f"Documento listo para impresion. Generado el {generated_at}. "
-            "Diseno optimizado para lectura rapida, validacion manual y control visual.",
+            f"Documento listo para impresión. Generado el {generated_at}. "
+            "Diseño optimizado para lectura rápida, validación manual y control visual por el equipo.",
             styles["subtitle"],
         ),
         Spacer(1, 0.16 * inch),
@@ -616,11 +635,12 @@ def build_pdf_bytes(tasks: Sequence[PackingTask]) -> io.BytesIO:
     table_rows = build_table_rows(tasks, styles)
     col_widths = [
         0.42 * inch,  # No.
-        0.62 * inch,  # Hecho
-        0.95 * inch,  # Iniciales / Hora
-        1.45 * inch,  # Venta principal
+        0.68 * inch,  # Hecho
+        0.78 * inch,  # Terminado
+        1.05 * inch,  # Iniciales / Hora
+        1.42 * inch,  # Venta principal
         1.38 * inch,  # Tipo
-        5.20 * inch,  # Contenido verificado
+        4.95 * inch,  # Contenido verificado
     ]
 
     main_table = LongTable(table_rows, colWidths=col_widths, repeatRows=1)
@@ -631,24 +651,24 @@ def build_pdf_bytes(tasks: Sequence[PackingTask]) -> io.BytesIO:
         ("BOX", (0, 0), (-1, -1), 0.9, BLACK),
         ("INNERGRID", (0, 0), (-1, -1), 0.45, BLACK),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ALIGN", (0, 0), (2, -1), "CENTER"),
-        ("ALIGN", (3, 1), (4, -1), "LEFT"),
-        ("ALIGN", (5, 1), (5, -1), "LEFT"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-        ("TOPPADDING", (0, 0), (-1, -1), 7),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ("ALIGN", (0, 0), (3, -1), "CENTER"),
+        ("ALIGN", (4, 1), (5, -1), "LEFT"),
+        ("ALIGN", (6, 1), (6, -1), "LEFT"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 7),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
     ]
 
     for row_idx, task in enumerate(tasks, start=1):
-        base_background = VERY_LIGHT_GRAY if row_idx % 2 == 0 else WHITE
+        base_background = SOFT_GRAY if row_idx % 2 == 0 else WHITE
         table_style_commands.append(("BACKGROUND", (0, row_idx), (-1, row_idx), base_background))
 
         if task.es_paquete:
             table_style_commands.extend(
                 [
-                    ("BACKGROUND", (3, row_idx), (4, row_idx), LIGHT_GRAY),
-                    ("LINEBEFORE", (3, row_idx), (3, row_idx), 1.0, BLACK),
+                    ("BACKGROUND", (4, row_idx), (5, row_idx), LIGHT_GRAY),
+                    ("LINEBEFORE", (4, row_idx), (4, row_idx), 1.0, BLACK),
                     ("LINEABOVE", (0, row_idx), (-1, row_idx), 0.85, BLACK),
                 ]
             )
@@ -661,7 +681,7 @@ def build_pdf_bytes(tasks: Sequence[PackingTask]) -> io.BytesIO:
             Paragraph("<b>Observaciones generales:</b>", styles["body_bold"]),
             Paragraph("________________________________________________________________________________", styles["body"]),
         ]],
-        colWidths=[1.8 * inch, 8.1 * inch],
+        colWidths=[1.95 * inch, 7.95 * inch],
     )
     observations.setStyle(
         TableStyle(
@@ -670,8 +690,8 @@ def build_pdf_bytes(tasks: Sequence[PackingTask]) -> io.BytesIO:
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 8),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-                ("TOPPADDING", (0, 0), (-1, -1), 8),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 9),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
                 ("BACKGROUND", (0, 0), (-1, -1), VERY_LIGHT_GRAY),
             ]
         )
@@ -702,13 +722,13 @@ def generate_outputs(excel_file: BinaryIO) -> tuple[pd.DataFrame, io.BytesIO, io
 
 def main() -> None:
     if st is None:
-        raise RuntimeError("Streamlit no esta instalado en este entorno.")
+        raise RuntimeError("Streamlit no está instalado en este entorno.")
 
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
     st.caption(
-        "Version enfocada en impresion a blanco y negro, casillas grandes de control, "
-        "tipografia mas legible y una estructura visual que reduce errores al entregar."
+        "Versión mejorada con tipografía más legible, doble control visual (Hecho y Terminado), "
+        "SKU resaltado y estructura profesional para reducir errores en operación."
     )
 
     uploaded_file = st.file_uploader("Sube el archivo Excel", type=["xlsx", "xls"])
