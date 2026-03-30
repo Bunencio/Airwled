@@ -9,7 +9,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
+from pathlib import Pathx
 from typing import BinaryIO, Iterable, Sequence
 from xml.sax.saxutils import escape
 
@@ -427,64 +427,19 @@ def extract_package_size_from_row(row: pd.Series, columns: ResolvedColumns) -> i
     return None
 
 
+
+
+def row_starts_new_order(row: pd.Series, columns: ResolvedColumns) -> bool:
+    return bool(clean_value(row[columns.sale]))
+
+
+def row_has_same_sale(row: pd.Series, columns: ResolvedColumns, main_sale: str) -> bool:
+    sale = clean_value(row[columns.sale])
+    return bool(sale) and sale == main_sale
+
+
 def row_has_package_signal(row: pd.Series, columns: ResolvedColumns) -> bool:
-    searchable = " ".join(
-        normalize_text(row[column]) for column in (columns.state, columns.title, columns.sale) if clean_value(row[column])
-    )
-    return any(
-        marker in searchable
-        for marker in (
-            'paquete',
-            'pack',
-            'paq',
-            'junto',
-            'mismo paquete',
-            'misma caja',
-            'caja',
-            'bundle',
-            'combo',
-            'kit',
-        )
-    )
-
-
-def row_starts_new_order(candidate_row: pd.Series, current_sale: str, columns: ResolvedColumns) -> bool:
-    candidate_sale = clean_value(candidate_row[columns.sale])
-    if not candidate_sale:
-        return False
-    if not current_sale:
-        return True
-    return candidate_sale != current_sale
-
-
-def should_attach_row_to_package(
-    candidate_row: pd.Series,
-    current_sale: str,
-    columns: ResolvedColumns,
-    expected_size: int | None,
-    current_count: int,
-    package_signal_active: bool,
-) -> bool:
-    if looks_like_header_artifact(candidate_row, columns):
-        return False
-
-    if not has_meaningful_item_data(candidate_row, columns):
-        return False
-
-    candidate_sale = clean_value(candidate_row[columns.sale])
-    same_sale = bool(current_sale) and candidate_sale == current_sale
-    blank_sale = not candidate_sale
-    candidate_has_package_signal = row_has_package_signal(candidate_row, columns)
-
-    if expected_size is not None and current_count < expected_size:
-        if same_sale or blank_sale or candidate_has_package_signal:
-            return True
-        return False
-
-    if same_sale or blank_sale:
-        return package_signal_active or candidate_has_package_signal
-
-    return False
+    return extract_package_size_from_row(row, columns) is not None
 
 
 def collect_package_items(
@@ -492,68 +447,75 @@ def collect_package_items(
     start_index: int,
     columns: ResolvedColumns,
     main_sale: str,
-    expected_size: int | None,
+    package_size: int,
 ) -> tuple[list[LineItem], int]:
-    package_items: list[LineItem] = []
-    package_signal_active = False
+    """
+    Consolida los productos del mismo paquete.
+
+    Reglas:
+    - la fila que dice "Paquete de N" puede traer el primer producto y debe incluirse;
+    - filas siguientes sin número de venta suelen ser continuación del mismo paquete;
+    - si aparece otra venta distinta, termina el paquete;
+    - si aparece otra fila con nueva señal de paquete, también termina el paquete.
+    """
+    items: list[LineItem] = []
     cursor = start_index
 
     while cursor < len(df):
-        current_row = df.iloc[cursor]
+        row = df.iloc[cursor]
 
-        if looks_like_header_artifact(current_row, columns):
+        if looks_like_header_artifact(row, columns):
             cursor += 1
             continue
 
-        if cursor == start_index:
-            if has_meaningful_item_data(current_row, columns):
-                package_items.append(
-                    build_line_item(
-                        sale_id=clean_value(current_row[columns.sale]) or main_sale,
-                        units_raw=current_row[columns.units],
-                        sku=current_row[columns.sku],
-                        title=current_row[columns.title],
-                    )
-                )
-            package_signal_active = row_has_package_signal(current_row, columns) or expected_size not in (None, 1)
-            cursor += 1
-            continue
-
-        if expected_size is not None and len(package_items) >= expected_size:
+        if cursor > start_index and row_has_package_signal(row, columns):
             break
 
-        candidate_row = df.iloc[cursor]
-        if should_attach_row_to_package(
-            candidate_row=candidate_row,
-            current_sale=main_sale,
-            columns=columns,
-            expected_size=expected_size,
-            current_count=len(package_items),
-            package_signal_active=package_signal_active,
-        ):
-            package_items.append(
+        if cursor > start_index and row_starts_new_order(row, columns) and not row_has_same_sale(row, columns, main_sale):
+            break
+
+        if has_meaningful_item_data(row, columns):
+            items.append(
                 build_line_item(
-                    sale_id=clean_value(candidate_row[columns.sale]) or main_sale,
-                    units_raw=candidate_row[columns.units],
-                    sku=candidate_row[columns.sku],
-                    title=candidate_row[columns.title],
+                    sale_id=clean_value(row[columns.sale]) or main_sale,
+                    units_raw=row[columns.units],
+                    sku=row[columns.sku],
+                    title=row[columns.title],
                 )
             )
-            package_signal_active = package_signal_active or row_has_package_signal(candidate_row, columns)
             cursor += 1
+            if len(items) >= package_size:
+                # Seguimos absorbiendo renglones vacíos de venta solo si claramente son continuación.
+                while cursor < len(df):
+                    next_row = df.iloc[cursor]
+                    if looks_like_header_artifact(next_row, columns):
+                        cursor += 1
+                        continue
+                    if row_has_package_signal(next_row, columns):
+                        break
+                    if row_starts_new_order(next_row, columns) and not row_has_same_sale(next_row, columns, main_sale):
+                        break
+                    if not has_meaningful_item_data(next_row, columns):
+                        cursor += 1
+                        continue
+                    # permite capturar paquetes mal etiquetados donde realmente vienen más de N productos
+                    items.append(
+                        build_line_item(
+                            sale_id=clean_value(next_row[columns.sale]) or main_sale,
+                            units_raw=next_row[columns.units],
+                            sku=next_row[columns.sku],
+                            title=next_row[columns.title],
+                        )
+                    )
+                    cursor += 1
+                break
             continue
 
-        if row_starts_new_order(candidate_row, main_sale, columns):
+        if cursor > start_index:
             break
+        cursor += 1
 
-        if not has_meaningful_item_data(candidate_row, columns):
-            cursor += 1
-            continue
-
-        break
-
-    return package_items, cursor
-
+    return items, cursor
 
 def build_output_filenames(source_name: str, generated_at: datetime) -> dict[str, str]:
     source_slug = slugify_filename(Path(source_name).stem)
@@ -645,18 +607,22 @@ def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[Order
         package_size = extract_package_size_from_row(row, columns)
 
         if package_size:
-            package_items, cursor = collect_package_items(
+            package_items, next_index = collect_package_items(
                 df=df,
                 start_index=i,
                 columns=columns,
                 main_sale=main_sale,
-                expected_size=package_size,
+                package_size=package_size,
             )
 
             if package_items:
                 if len(package_items) < package_size:
                     warnings.append(
-                        f"La venta '{main_sale}' indica paquete de {package_size}, pero solo se pudieron consolidar {len(package_items)} artículo(s) útiles."
+                        f"La venta '{main_sale}' indica paquete de {package_size}, pero solo se pudieron consolidar {len(package_items)} artículo(s) del mismo paquete."
+                    )
+                elif len(package_items) > package_size:
+                    warnings.append(
+                        f"La venta '{main_sale}' indica paquete de {package_size}, pero se detectaron {len(package_items)} productos asociados en la misma caja. Se respetó el agrupado real."
                     )
 
                 orders.append(
@@ -667,7 +633,7 @@ def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[Order
                         raw_state=raw_state,
                     )
                 )
-                i = cursor
+                i = next_index
                 continue
 
             warnings.append(
