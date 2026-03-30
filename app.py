@@ -9,7 +9,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from pathlib import Pathx
+from pathlib import Path
 from typing import BinaryIO, Iterable, Sequence
 from xml.sax.saxutils import escape
 
