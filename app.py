@@ -427,6 +427,134 @@ def extract_package_size_from_row(row: pd.Series, columns: ResolvedColumns) -> i
     return None
 
 
+def row_has_package_signal(row: pd.Series, columns: ResolvedColumns) -> bool:
+    searchable = " ".join(
+        normalize_text(row[column]) for column in (columns.state, columns.title, columns.sale) if clean_value(row[column])
+    )
+    return any(
+        marker in searchable
+        for marker in (
+            'paquete',
+            'pack',
+            'paq',
+            'junto',
+            'mismo paquete',
+            'misma caja',
+            'caja',
+            'bundle',
+            'combo',
+            'kit',
+        )
+    )
+
+
+def row_starts_new_order(candidate_row: pd.Series, current_sale: str, columns: ResolvedColumns) -> bool:
+    candidate_sale = clean_value(candidate_row[columns.sale])
+    if not candidate_sale:
+        return False
+    if not current_sale:
+        return True
+    return candidate_sale != current_sale
+
+
+def should_attach_row_to_package(
+    candidate_row: pd.Series,
+    current_sale: str,
+    columns: ResolvedColumns,
+    expected_size: int | None,
+    current_count: int,
+    package_signal_active: bool,
+) -> bool:
+    if looks_like_header_artifact(candidate_row, columns):
+        return False
+
+    if not has_meaningful_item_data(candidate_row, columns):
+        return False
+
+    candidate_sale = clean_value(candidate_row[columns.sale])
+    same_sale = bool(current_sale) and candidate_sale == current_sale
+    blank_sale = not candidate_sale
+    candidate_has_package_signal = row_has_package_signal(candidate_row, columns)
+
+    if expected_size is not None and current_count < expected_size:
+        if same_sale or blank_sale or candidate_has_package_signal:
+            return True
+        return False
+
+    if same_sale or blank_sale:
+        return package_signal_active or candidate_has_package_signal
+
+    return False
+
+
+def collect_package_items(
+    df: pd.DataFrame,
+    start_index: int,
+    columns: ResolvedColumns,
+    main_sale: str,
+    expected_size: int | None,
+) -> tuple[list[LineItem], int]:
+    package_items: list[LineItem] = []
+    package_signal_active = False
+    cursor = start_index
+
+    while cursor < len(df):
+        current_row = df.iloc[cursor]
+
+        if looks_like_header_artifact(current_row, columns):
+            cursor += 1
+            continue
+
+        if cursor == start_index:
+            if has_meaningful_item_data(current_row, columns):
+                package_items.append(
+                    build_line_item(
+                        sale_id=clean_value(current_row[columns.sale]) or main_sale,
+                        units_raw=current_row[columns.units],
+                        sku=current_row[columns.sku],
+                        title=current_row[columns.title],
+                    )
+                )
+            package_signal_active = row_has_package_signal(current_row, columns) or expected_size not in (None, 1)
+            cursor += 1
+            continue
+
+        if expected_size is not None and len(package_items) >= expected_size:
+            break
+
+        candidate_row = df.iloc[cursor]
+        if should_attach_row_to_package(
+            candidate_row=candidate_row,
+            current_sale=main_sale,
+            columns=columns,
+            expected_size=expected_size,
+            current_count=len(package_items),
+            package_signal_active=package_signal_active,
+        ):
+            package_items.append(
+                build_line_item(
+                    sale_id=clean_value(candidate_row[columns.sale]) or main_sale,
+                    units_raw=candidate_row[columns.units],
+                    sku=candidate_row[columns.sku],
+                    title=candidate_row[columns.title],
+                )
+            )
+            package_signal_active = package_signal_active or row_has_package_signal(candidate_row, columns)
+            cursor += 1
+            continue
+
+        if row_starts_new_order(candidate_row, main_sale, columns):
+            break
+
+        if not has_meaningful_item_data(candidate_row, columns):
+            cursor += 1
+            continue
+
+        break
+
+    return package_items, cursor
+
+
 def build_output_filenames(source_name: str, generated_at: datetime) -> dict[str, str]:
     source_slug = slugify_filename(Path(source_name).stem)
     stamp = generated_at.strftime("%Y%m%d_%H%M%S")
@@ -517,41 +645,13 @@ def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[Order
         package_size = extract_package_size_from_row(row, columns)
 
         if package_size:
-            package_items: list[LineItem] = []
-
-            # Corrección clave: muchos archivos marcan "Paquete de N" en la misma fila
-            # del primer producto. Antes esa fila se ignoraba y el paquete salía incompleto.
-            if has_meaningful_item_data(row, columns):
-                package_items.append(
-                    build_line_item(
-                        sale_id=clean_value(row[columns.sale]) or main_sale,
-                        units_raw=row[columns.units],
-                        sku=row[columns.sku],
-                        title=row[columns.title],
-                    )
-                )
-
-            cursor = i + 1
-            while cursor < len(df) and len(package_items) < package_size:
-                candidate_row = df.iloc[cursor]
-
-                if looks_like_header_artifact(candidate_row, columns):
-                    cursor += 1
-                    continue
-
-                if not has_meaningful_item_data(candidate_row, columns):
-                    cursor += 1
-                    continue
-
-                package_items.append(
-                    build_line_item(
-                        sale_id=clean_value(candidate_row[columns.sale]) or main_sale,
-                        units_raw=candidate_row[columns.units],
-                        sku=candidate_row[columns.sku],
-                        title=candidate_row[columns.title],
-                    )
-                )
-                cursor += 1
+            package_items, cursor = collect_package_items(
+                df=df,
+                start_index=i,
+                columns=columns,
+                main_sale=main_sale,
+                expected_size=package_size,
+            )
 
             if package_items:
                 if len(package_items) < package_size:
