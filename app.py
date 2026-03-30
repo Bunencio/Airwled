@@ -3,7 +3,6 @@ from __future__ import annotations
 import io
 import re
 import unicodedata
-from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from typing import BinaryIO, Iterable, Sequence
@@ -40,10 +39,8 @@ COLOR_HEADER = colors.HexColor("#1F2937")
 COLOR_SUBHEADER = colors.HexColor("#E5E7EB")
 COLOR_ROW_ALT = colors.HexColor("#F9FAFB")
 COLOR_ROW = colors.HexColor("#FFFFFF")
-COLOR_ACCENT = colors.HexColor("#D1D5DB")
 COLOR_TEXT_SOFT = colors.HexColor("#4B5563")
 COLOR_PACKAGE = colors.HexColor("#EEF2FF")
-COLOR_WARNING = colors.HexColor("#FEF3C7")
 
 
 @dataclass(frozen=True)
@@ -174,21 +171,16 @@ def safe_paragraph_text(value: object, default: str = "-") -> str:
 
 
 
-def slugify_filename(name: str) -> str:
-    text = normalize_text(name)
-    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
-    return text or "archivo"
-
-
-
 def to_number(value: object) -> float | None:
     text = clean_value(value)
     if not text:
         return None
+
     normalized = text.replace(",", ".")
     normalized = re.sub(r"[^0-9.\-]", "", normalized)
     if not normalized or normalized in {"-", ".", "-."}:
         return None
+
     try:
         return float(normalized)
     except ValueError:
@@ -202,8 +194,7 @@ def format_number(value: float) -> str:
 
 
 def normalize_sku(value: object) -> str:
-    sku = clean_value(value)
-    return sku.upper().strip()
+    return clean_value(value).upper().strip()
 
 
 
@@ -499,8 +490,6 @@ def build_preparation_dataframe(preparation_items: Iterable[PreparationItem]) ->
                 "SKU": item.sku,
                 "Producto": item.product_name,
                 "Total a preparar": format_number(item.total_units),
-                "Ventas involucradas": item.order_count,
-                "Renglones detectados": item.line_count,
             }
         )
     return pd.DataFrame(rows)
@@ -513,10 +502,7 @@ def build_summary_dataframe(orders: Iterable[OrderGroup], preparation_items: Ite
     grouped_count = sum(1 for order in order_list if order.is_package)
     individual_count = len(order_list) - grouped_count
     product_lines = sum(order.item_count for order in order_list)
-
-    total_detected_units = sum(
-        item.total_units for item in prep_list
-    )
+    total_detected_units = sum(item.total_units for item in prep_list)
 
     return pd.DataFrame(
         [
@@ -875,45 +861,56 @@ def build_main_pdf_buffer(orders: list[OrderGroup], page_label: str) -> io.Bytes
 # -----------------------------------------------------------------------------
 
 
-def build_preparation_table(prep_df: pd.DataFrame, width: float, styles: dict[str, ParagraphStyle]) -> Table:
+def build_preparation_table(items: list[PreparationItem], width: float, styles: dict[str, ParagraphStyle]) -> LongTable:
+    fixed_widths = {
+        "no": 0.50 * inch,
+        "qty": 1.05 * inch,
+        "sku": 1.80 * inch,
+    }
+    product_width = width - sum(fixed_widths.values())
     col_widths = [
-        width * 0.25,  # SKU
-        width * 0.55,  # Producto
-        width * 0.20,  # Cantidad
+        fixed_widths["no"],
+        fixed_widths["qty"],
+        fixed_widths["sku"],
+        product_width,
     ]
 
-    data = [
-        [
-            Paragraph("SKU", styles["table_header"]),
-            Paragraph("Producto", styles["table_header"]),
-            Paragraph("Cantidad", styles["table_header"]),
-        ]
-    ]
+    data: list[list[object]] = [[
+        Paragraph("#", styles["table_header"]),
+        Paragraph("Cantidad", styles["table_header"]),
+        Paragraph("SKU", styles["table_header"]),
+        Paragraph("Producto", styles["table_header"]),
+    ]]
 
-    for _, row in prep_df.iterrows():
+    for idx, item in enumerate(items, start=1):
         data.append(
             [
-                Paragraph(escape(str(row["SKU"])), styles["cell_center"]),
-                Paragraph(escape(str(row["Producto"])), styles["cell_detail"]),
-                Paragraph(str(row["Cantidad"]), styles["cell_center"]),
+                Paragraph(str(idx), styles["cell_center"]),
+                Paragraph(format_number(item.total_units), styles["cell_qty"]),
+                Paragraph(escape(item.sku), styles["cell_sale"]),
+                Paragraph(safe_paragraph_text(item.product_name), styles["cell_product"]),
             ]
         )
 
-    table = Table(data, colWidths=col_widths, repeatRows=1)
-
+    table = LongTable(data, colWidths=col_widths, repeatRows=1, splitByRow=1)
     table.setStyle(
         TableStyle(
             [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.black),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+                ("BACKGROUND", (0, 0), (-1, 0), COLOR_HEADER),
+                ("TEXTCOLOR", (0, 0), (-1, 0), COLOR_WHITE),
+                ("BOX", (0, 0), (-1, -1), 0.75, COLOR_BLACK),
+                ("INNERGRID", (0, 0), (-1, -1), 0.40, COLOR_BLACK),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("ALIGN", (2, 1), (2, -1), "CENTER"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [COLOR_ROW, COLOR_ROW_ALT]),
             ]
         )
     )
-
     return table
+
 
 
 def build_preparation_pdf_buffer(preparation_items: list[PreparationItem], page_label: str) -> io.BytesIO:
@@ -939,7 +936,7 @@ def build_preparation_pdf_buffer(preparation_items: list[PreparationItem], page_
             document_title="Lista de preparación previa por SKU",
             subtitle=(
                 "Este documento consolida cantidades por SKU antes de empacar. "
-                "Se usa SKU como llave principal para evitar errores cuando coinciden nombres de producto."
+                "Las columnas de Ventas y Renglón fueron removidas para dejar una tabla más limpia y operativa."
             ),
             metrics=[
                 ("SKUs", str(len(preparation_items))),
@@ -1079,6 +1076,7 @@ def main() -> None:
             - Los **paquetes** siguen agrupados correctamente bajo la misma venta.
             - Se genera un segundo PDF con la **preparación total por SKU** antes del empacado.
             - La consolidación usa **SKU como llave principal**, no el nombre del producto.
+            - La tabla de preparación quedó más limpia: **sin columnas de Ventas ni Renglón**.
             """
         )
 
