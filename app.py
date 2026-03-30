@@ -13,7 +13,7 @@ import streamlit as st
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter, landscape
+from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import (
@@ -154,15 +154,18 @@ def normalize_text(value: object) -> str:
     return text.lower().strip()
 
 
+
 def clean_value(value: object) -> str:
     if pd.isna(value):
         return ""
     return str(value).strip()
 
 
+
 def safe_paragraph_text(value: object, default: str = "-") -> str:
     text = clean_value(value) or default
     return escape(text).replace("\n", "<br/>")
+
 
 
 def to_number(value: object) -> float | None:
@@ -179,6 +182,7 @@ def to_number(value: object) -> float | None:
         return float(normalized)
     except ValueError:
         return None
+
 
 
 def slugify_filename(name: str) -> str:
@@ -229,6 +233,7 @@ def resolve_source_columns(df: pd.DataFrame) -> tuple[ResolvedColumns, list[str]
     )
 
 
+
 def load_source_dataframe(excel_file: BinaryIO) -> tuple[pd.DataFrame, ResolvedColumns, list[str]]:
     df = pd.read_excel(excel_file, header=HEADER_ROW_INDEX)
     df = df.dropna(how="all").reset_index(drop=True)
@@ -240,11 +245,13 @@ def load_source_dataframe(excel_file: BinaryIO) -> tuple[pd.DataFrame, ResolvedC
     return df, columns, warnings
 
 
+
 def extract_package_size(state_value: str) -> int | None:
     match = PACKAGE_PATTERN.search(state_value)
     if not match:
         return None
     return int(match.group(1))
+
 
 
 def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[OrderGroup], list[str]]:
@@ -317,6 +324,7 @@ def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[Order
         i += 1
 
     return orders, warnings
+
 
 
 def build_output_dataframe(orders: Iterable[OrderGroup]) -> pd.DataFrame:
@@ -530,6 +538,7 @@ def make_summary_box(label: str, value: str, width: float, styles: dict[str, Par
     return table
 
 
+
 def build_header_block(orders: list[OrderGroup], styles: dict[str, ParagraphStyle], doc_width: float) -> list:
     grouped_count = sum(1 for order in orders if order.delivery_type.startswith("JUNTO"))
     individual_count = sum(1 for order in orders if order.delivery_type == "INDIVIDUAL")
@@ -574,6 +583,7 @@ def build_header_block(orders: list[OrderGroup], styles: dict[str, ParagraphStyl
     ]
 
 
+
 def build_order_header(order: OrderGroup, width: float, styles: dict[str, ParagraphStyle]) -> Table:
     col_widths = [width * 0.44, width * 0.28, width * 0.28]
 
@@ -609,9 +619,10 @@ def build_order_header(order: OrderGroup, width: float, styles: dict[str, Paragr
     return table
 
 
+
 def build_items_table(order: OrderGroup, width: float, styles: dict[str, ParagraphStyle]) -> Table:
-    qty_width = 0.80 * inch
-    sku_width = 2.20 * inch
+    qty_width = 0.76 * inch
+    sku_width = 1.75 * inch
     product_width = width - qty_width - sku_width
 
     data = [[
@@ -647,6 +658,7 @@ def build_items_table(order: OrderGroup, width: float, styles: dict[str, Paragra
         )
     )
     return table
+
 
 
 def build_status_table(width: float, styles: dict[str, ParagraphStyle]) -> Table:
@@ -690,17 +702,15 @@ def build_status_table(width: float, styles: dict[str, ParagraphStyle]) -> Table
     return table
 
 
+
 def draw_page_footer(canvas, doc) -> None:
     page_number = canvas.getPageNumber()
     canvas.saveState()
     canvas.setFont("Helvetica", 8)
     canvas.setFillColor(COLOR_BLACK)
-    canvas.drawCentredString(
-        doc.pagesize[0] / 2,
-        0.28 * inch,
-        f"Lista de empaque operativa - Página {page_number}"
-    )
+    canvas.drawCentredString(letter[0] / 2, 0.28 * inch, f"Lista de empaque operativa - Página {page_number}")
     canvas.restoreState()
+
 
 
 def build_pdf_buffer(orders: list[OrderGroup]) -> io.BytesIO:
@@ -709,7 +719,7 @@ def build_pdf_buffer(orders: list[OrderGroup]) -> io.BytesIO:
 
     doc = SimpleDocTemplate(
         buffer,
-        pagesize=landscape(letter),
+        pagesize=letter,
         leftMargin=PAGE_MARGINS["left"],
         rightMargin=PAGE_MARGINS["right"],
         topMargin=PAGE_MARGINS["top"],
@@ -773,6 +783,7 @@ def render_metrics(orders: list[OrderGroup]) -> None:
     col4.metric("Productos listados", total_items)
 
 
+
 def render_downloads(excel_buffer: io.BytesIO, pdf_buffer: io.BytesIO) -> None:
     col1, col2 = st.columns(2)
 
@@ -789,10 +800,11 @@ def render_downloads(excel_buffer: io.BytesIO, pdf_buffer: io.BytesIO) -> None:
         st.download_button(
             label="Descargar PDF",
             data=pdf_buffer.getvalue(),
-            file_name="lista_empaque_operativa_horizontal.pdf",
+            file_name="lista_empaque_operativa.pdf",
             mime="application/pdf",
             use_container_width=True,
         )
+
 
 
 def main() -> None:
@@ -812,7 +824,6 @@ def main() -> None:
             - Diseño limpio para impresión en blanco y negro.
             - Bloques por venta para reducir errores operativos.
             - Casillas para surtido, revisión, entrega, iniciales y hora.
-            - PDF en orientación horizontal para aprovechar más ancho.
             """
         )
 
