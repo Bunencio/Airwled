@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import re
 import unicodedata
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from typing import BinaryIO, Iterable, Sequence
@@ -39,8 +40,10 @@ COLOR_HEADER = colors.HexColor("#1F2937")
 COLOR_SUBHEADER = colors.HexColor("#E5E7EB")
 COLOR_ROW_ALT = colors.HexColor("#F9FAFB")
 COLOR_ROW = colors.HexColor("#FFFFFF")
+COLOR_ACCENT = colors.HexColor("#D1D5DB")
 COLOR_TEXT_SOFT = colors.HexColor("#4B5563")
 COLOR_PACKAGE = colors.HexColor("#EEF2FF")
+COLOR_WARNING = colors.HexColor("#FEF3C7")
 
 
 @dataclass(frozen=True)
@@ -120,10 +123,10 @@ COLUMN_RULES: tuple[ColumnRule, ...] = (
     ColumnRule("sale", 0, ("venta", "pedido", "order", "folio")),
     ColumnRule("state", 2, ("estado", "status")),
     ColumnRule("units", 6, ("unidades", "cantidad", "cant", "qty")),
-    ColumnRule("sku", 16, ("sku", "codigo", "código", "asin", "referencia")),
+    ColumnRule("sku", 17, ("sku", "seller sku", "codigo", "código", "asin", "referencia")),
     ColumnRule(
         "title",
-        20,
+        21,
         ("titulo", "título", "producto", "descripcion", "descripción", "articulo", "artículo"),
     ),
 )
@@ -171,16 +174,21 @@ def safe_paragraph_text(value: object, default: str = "-") -> str:
 
 
 
+def slugify_filename(name: str) -> str:
+    text = normalize_text(name)
+    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    return text or "archivo"
+
+
+
 def to_number(value: object) -> float | None:
     text = clean_value(value)
     if not text:
         return None
-
     normalized = text.replace(",", ".")
     normalized = re.sub(r"[^0-9.\-]", "", normalized)
     if not normalized or normalized in {"-", ".", "-."}:
         return None
-
     try:
         return float(normalized)
     except ValueError:
@@ -194,7 +202,8 @@ def format_number(value: float) -> str:
 
 
 def normalize_sku(value: object) -> str:
-    return clean_value(value).upper().strip()
+    sku = clean_value(value)
+    return sku.upper().strip()
 
 
 
@@ -242,28 +251,59 @@ def pick_canonical_product_name(names: Sequence[str]) -> str:
 
 
 def resolve_source_columns(df: pd.DataFrame) -> tuple[ResolvedColumns, list[str]]:
-    normalized_headers = {column: normalize_text(column) for column in df.columns}
+    normalized_headers = [(column, normalize_text(column)) for column in df.columns]
     warnings: list[str] = []
     resolved: dict[str, str] = {}
 
-    for rule in COLUMN_RULES:
-        found_column = None
-        for column_name, normalized_header in normalized_headers.items():
-            if any(alias in normalized_header for alias in rule.aliases):
-                found_column = column_name
-                break
+    preferred_exact_matches: dict[str, tuple[str, ...]] = {
+        "sale": ("# de venta", "venta", "pedido", "order", "folio"),
+        "state": ("estado",),
+        "units": ("unidades", "cantidad", "qty"),
+        "sku": ("sku", "seller sku"),
+        "title": ("titulo de la publicacion", "titulo", "producto", "descripcion"),
+    }
 
-        if found_column is None:
+    def score_header(rule: ColumnRule, normalized_header: str, column_position: int) -> tuple[int, int]:
+        exacts = tuple(normalize_text(v) for v in preferred_exact_matches.get(rule.key, ()))
+        aliases = tuple(normalize_text(v) for v in rule.aliases)
+
+        if normalized_header in exacts:
+            return (400, -column_position)
+        if any(normalized_header.startswith(alias) for alias in exacts):
+            return (350, -column_position)
+        if any(re.search(rf"(^|\b){re.escape(alias)}(\b|$)", normalized_header) for alias in aliases):
+            return (300, -column_position)
+        if any(alias in normalized_header for alias in aliases):
+            return (200, -column_position)
+        return (-1, -column_position)
+
+    for rule in COLUMN_RULES:
+        best_column = None
+        best_score = (-1, 0)
+
+        for idx, (column_name, normalized_header) in enumerate(normalized_headers):
+            candidate_score = score_header(rule, normalized_header, idx)
+            if candidate_score > best_score:
+                best_score = candidate_score
+                best_column = column_name
+
+        if best_column is None or best_score[0] < 0:
             if rule.fallback_index >= len(df.columns):
                 raise ValueError(
                     f"No se pudo resolver la columna '{rule.key}' y el índice de respaldo {rule.fallback_index + 1} no existe."
                 )
-            found_column = df.columns[rule.fallback_index]
+            best_column = df.columns[rule.fallback_index]
             warnings.append(
-                f"La columna '{rule.key}' no se encontró por nombre; se usó la columna en posición {rule.fallback_index + 1}."
+                f"La columna '{rule.key}' no se encontró por nombre; se usó la columna en posición {rule.fallback_index + 1} ({best_column})."
             )
 
-        resolved[rule.key] = found_column
+        resolved[rule.key] = best_column
+
+    warnings.append(
+        "Columnas detectadas: "
+        f"venta='{resolved['sale']}', estado='{resolved['state']}', unidades='{resolved['units']}', "
+        f"sku='{resolved['sku']}', producto='{resolved['title']}'."
+    )
 
     return (
         ResolvedColumns(
@@ -490,6 +530,8 @@ def build_preparation_dataframe(preparation_items: Iterable[PreparationItem]) ->
                 "SKU": item.sku,
                 "Producto": item.product_name,
                 "Total a preparar": format_number(item.total_units),
+                "Ventas involucradas": item.order_count,
+                "Renglones detectados": item.line_count,
             }
         )
     return pd.DataFrame(rows)
@@ -502,7 +544,10 @@ def build_summary_dataframe(orders: Iterable[OrderGroup], preparation_items: Ite
     grouped_count = sum(1 for order in order_list if order.is_package)
     individual_count = len(order_list) - grouped_count
     product_lines = sum(order.item_count for order in order_list)
-    total_detected_units = sum(item.total_units for item in prep_list)
+
+    total_detected_units = sum(
+        item.total_units for item in prep_list
+    )
 
     return pd.DataFrame(
         [
@@ -863,21 +908,27 @@ def build_main_pdf_buffer(orders: list[OrderGroup], page_label: str) -> io.Bytes
 
 def build_preparation_table(items: list[PreparationItem], width: float, styles: dict[str, ParagraphStyle]) -> LongTable:
     fixed_widths = {
-        "no": 0.50 * inch,
-        "qty": 1.05 * inch,
-        "sku": 1.80 * inch,
+        "no": 0.42 * inch,
+        "qty": 0.92 * inch,
+        "orders": 0.95 * inch,
+        "lines": 0.95 * inch,
+        "sku": 1.55 * inch,
     }
     product_width = width - sum(fixed_widths.values())
     col_widths = [
         fixed_widths["no"],
         fixed_widths["qty"],
+        fixed_widths["orders"],
+        fixed_widths["lines"],
         fixed_widths["sku"],
         product_width,
     ]
 
     data: list[list[object]] = [[
         Paragraph("#", styles["table_header"]),
-        Paragraph("Cantidad", styles["table_header"]),
+        Paragraph("Total", styles["table_header"]),
+        Paragraph("Ventas", styles["table_header"]),
+        Paragraph("Rengl.", styles["table_header"]),
         Paragraph("SKU", styles["table_header"]),
         Paragraph("Producto", styles["table_header"]),
     ]]
@@ -887,6 +938,8 @@ def build_preparation_table(items: list[PreparationItem], width: float, styles: 
             [
                 Paragraph(str(idx), styles["cell_center"]),
                 Paragraph(format_number(item.total_units), styles["cell_qty"]),
+                Paragraph(str(item.order_count), styles["cell_center"]),
+                Paragraph(str(item.line_count), styles["cell_center"]),
                 Paragraph(escape(item.sku), styles["cell_sale"]),
                 Paragraph(safe_paragraph_text(item.product_name), styles["cell_product"]),
             ]
@@ -936,7 +989,7 @@ def build_preparation_pdf_buffer(preparation_items: list[PreparationItem], page_
             document_title="Lista de preparación previa por SKU",
             subtitle=(
                 "Este documento consolida cantidades por SKU antes de empacar. "
-                "Las columnas de Ventas y Renglón fueron removidas para dejar una tabla más limpia y operativa."
+                "Se usa SKU como llave principal para evitar errores cuando coinciden nombres de producto."
             ),
             metrics=[
                 ("SKUs", str(len(preparation_items))),
@@ -1076,7 +1129,6 @@ def main() -> None:
             - Los **paquetes** siguen agrupados correctamente bajo la misma venta.
             - Se genera un segundo PDF con la **preparación total por SKU** antes del empacado.
             - La consolidación usa **SKU como llave principal**, no el nombre del producto.
-            - La tabla de preparación quedó más limpia: **sin columnas de Ventas ni Renglón**.
             """
         )
 
