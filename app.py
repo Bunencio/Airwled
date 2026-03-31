@@ -318,12 +318,48 @@ def resolve_source_columns(df: pd.DataFrame) -> tuple[ResolvedColumns, list[str]
 
 
 
+def detect_header_row(raw_df: pd.DataFrame, max_scan_rows: int = 15) -> int:
+    best_index = -1
+    best_score = -1
+    for idx in range(min(len(raw_df), max_scan_rows)):
+        row_values = [normalize_text(value) for value in raw_df.iloc[idx].tolist()]
+        score = 0
+        if any(value == "# de venta" for value in row_values):
+            score += 5
+        if any(value == "sku" for value in row_values):
+            score += 5
+        if any("titulo de la publicacion" in value for value in row_values):
+            score += 5
+        if any(value == "estado" for value in row_values):
+            score += 3
+        if sum(1 for value in row_values if value == "unidades") >= 1:
+            score += 3
+        if score > best_score:
+            best_score = score
+            best_index = idx
+
+    if best_index < 0 or best_score < 10:
+        raise ValueError(
+            "No se pudo detectar automáticamente la fila de encabezados del reporte."
+        )
+    return best_index
+
+
+
 def load_source_dataframe(excel_file: BinaryIO) -> tuple[pd.DataFrame, ResolvedColumns, list[str]]:
-    df = pd.read_excel(excel_file, header=HEADER_ROW_INDEX)
+    raw_df = pd.read_excel(excel_file, header=None)
+    raw_df = raw_df.dropna(how="all").reset_index(drop=True)
+    if raw_df.empty:
+        raise ValueError("El archivo no contiene datos válidos.")
+
+    header_row_index = detect_header_row(raw_df)
+    df = pd.read_excel(excel_file, header=header_row_index)
     df = df.dropna(how="all").reset_index(drop=True)
     if df.empty:
         raise ValueError("El archivo no contiene datos válidos después de la fila de encabezados.")
+
     columns, warnings = resolve_source_columns(df)
+    warnings.insert(0, f"Fila de encabezados detectada automáticamente: {header_row_index + 1}.")
     return df, columns, warnings
 
 
@@ -530,8 +566,6 @@ def build_preparation_dataframe(preparation_items: Iterable[PreparationItem]) ->
                 "SKU": item.sku,
                 "Producto": item.product_name,
                 "Total a preparar": format_number(item.total_units),
-                "Ventas involucradas": item.order_count,
-                "Renglones detectados": item.line_count,
             }
         )
     return pd.DataFrame(rows)
@@ -909,17 +943,13 @@ def build_main_pdf_buffer(orders: list[OrderGroup], page_label: str) -> io.Bytes
 def build_preparation_table(items: list[PreparationItem], width: float, styles: dict[str, ParagraphStyle]) -> LongTable:
     fixed_widths = {
         "no": 0.42 * inch,
-        "qty": 0.92 * inch,
-        "orders": 0.95 * inch,
-        "lines": 0.95 * inch,
-        "sku": 1.55 * inch,
+        "qty": 0.95 * inch,
+        "sku": 1.65 * inch,
     }
     product_width = width - sum(fixed_widths.values())
     col_widths = [
         fixed_widths["no"],
         fixed_widths["qty"],
-        fixed_widths["orders"],
-        fixed_widths["lines"],
         fixed_widths["sku"],
         product_width,
     ]
@@ -927,8 +957,6 @@ def build_preparation_table(items: list[PreparationItem], width: float, styles: 
     data: list[list[object]] = [[
         Paragraph("#", styles["table_header"]),
         Paragraph("Total", styles["table_header"]),
-        Paragraph("Ventas", styles["table_header"]),
-        Paragraph("Rengl.", styles["table_header"]),
         Paragraph("SKU", styles["table_header"]),
         Paragraph("Producto", styles["table_header"]),
     ]]
@@ -938,8 +966,6 @@ def build_preparation_table(items: list[PreparationItem], width: float, styles: 
             [
                 Paragraph(str(idx), styles["cell_center"]),
                 Paragraph(format_number(item.total_units), styles["cell_qty"]),
-                Paragraph(str(item.order_count), styles["cell_center"]),
-                Paragraph(str(item.line_count), styles["cell_center"]),
                 Paragraph(escape(item.sku), styles["cell_sale"]),
                 Paragraph(safe_paragraph_text(item.product_name), styles["cell_product"]),
             ]
