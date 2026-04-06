@@ -57,6 +57,7 @@ class ResolvedColumns:
     units: str
     sku: str
     title: str
+    multi_product_flag: str | None = None
 
 
 @dataclass(frozen=True)
@@ -189,6 +190,20 @@ def normalize_sku(value: object) -> str:
     sku = clean_value(value)
     return sku.upper().strip()
 
+def is_yes_like(value: object) -> bool:
+    text = normalize_text(value)
+    return text in {"si", "sí", "yes", "y", "true", "1"}
+
+
+def is_multi_product_member(row: pd.Series, columns: ResolvedColumns) -> bool:
+    if not columns.multi_product_flag:
+        return False
+
+    if columns.multi_product_flag not in row.index:
+        return False
+
+    return is_yes_like(row[columns.multi_product_flag])
+    
 def is_cancelled_state(state_value: object) -> bool:
     text = normalize_text(state_value)
 
@@ -309,6 +324,31 @@ def reset_excel_pointer(excel_file: BinaryIO) -> None:
 # LECTURA Y PARSEO
 # -----------------------------------------------------------------------------
 
+def resolve_optional_multi_product_column(df: pd.DataFrame) -> str | None:
+    aliases = (
+        "paquete de varios productos",
+        "varios productos",
+        "paquete varios productos",
+    )
+
+    best_column = None
+    best_score = -1
+
+    for idx, column_name in enumerate(df.columns):
+        normalized_header = normalize_text(column_name)
+
+        if normalized_header in aliases:
+            score = 300
+        elif any(alias in normalized_header for alias in aliases):
+            score = 200
+        else:
+            score = -1
+
+        if score > best_score:
+            best_score = score
+            best_column = column_name
+
+    return best_column if best_score >= 0 else None
 
 def resolve_source_columns(df: pd.DataFrame) -> tuple[ResolvedColumns, list[str]]:
     normalized_headers = [(column, normalize_text(column)) for column in df.columns]
@@ -365,6 +405,17 @@ def resolve_source_columns(df: pd.DataFrame) -> tuple[ResolvedColumns, list[str]
         f"sku='{resolved['sku']}', producto='{resolved['title']}'."
     )
 
+        multi_product_flag = resolve_optional_multi_product_column(df)
+
+    if multi_product_flag:
+        warnings.append(
+            f"Columna opcional detectada para paquetes múltiples: '{multi_product_flag}'."
+        )
+    else:
+        warnings.append(
+            "No se detectó la columna 'Paquete de varios productos'; se usará la lógica general de paquetes."
+        )
+
     return (
         ResolvedColumns(
             sale=resolved["sale"],
@@ -372,6 +423,7 @@ def resolve_source_columns(df: pd.DataFrame) -> tuple[ResolvedColumns, list[str]
             units=resolved["units"],
             sku=resolved["sku"],
             title=resolved["title"],
+            multi_product_flag=multi_product_flag,
         ),
         warnings,
     )
@@ -472,59 +524,75 @@ def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[Order
         # CASO PAQUETE
         # ---------------------------------------------------------------------
         if package_size:
-            items: list[LineItem] = []
-            next_index = i + 1
+    items: list[LineItem] = []
+    next_index = i + 1
 
-            while next_index < len(df) and len(items) < package_size:
-                candidate = df.iloc[next_index]
-            
-                if looks_like_header_artifact(candidate, columns):
-                    next_index += 1
-                    continue
-            
-                candidate_state = clean_value(candidate[columns.state])
-            
-                # NUEVO: si el hijo está cancelado, no se agrega al paquete
-                if is_cancelled_state(candidate_state):
-                    warnings.append(
-                        f"Se omitió un renglón hijo cancelado dentro de la venta '{main_sale}' "
-                        f"porque su estado es '{candidate_state}'."
-                    )
-                    next_index += 1
-                    continue
+    while next_index < len(df) and len(items) < package_size:
+        candidate = df.iloc[next_index]
 
-                # Si aparece otra venta-paquete, se corta el bloque
-                if looks_like_package_summary_row(candidate, columns):
-                    break
+        if looks_like_header_artifact(candidate, columns):
+            next_index += 1
+            continue
 
-                # Si trae un # de venta distinto y además parece una venta normal, ya no es hija
-                candidate_sale = clean_value(candidate[columns.sale])
-         
+        candidate_state = clean_value(candidate[columns.state])
 
-                starts_new_normal_order = (
-                    candidate_sale != ""
-                    and candidate_sale != main_sale
-                    and candidate_state != ""
-                    and extract_package_size(candidate_state) is None
+        if is_cancelled_state(candidate_state):
+            warnings.append(
+                f"Se omitió un renglón hijo cancelado dentro de la venta '{main_sale}' "
+                f"porque su estado es '{candidate_state}'."
+            )
+            next_index += 1
+            continue
+
+        # Si aparece otra fila resumen de paquete, aquí se termina el bloque actual
+        if looks_like_package_summary_row(candidate, columns):
+            break
+
+        candidate_sale = clean_value(candidate[columns.sale])
+        candidate_is_multi_member = is_multi_product_member(candidate, columns)
+
+        # CASO IMPORTANTE:
+        # si la fila viene marcada con "Paquete de varios productos" = Sí,
+        # entonces sí pertenece al paquete aunque tenga otro # de venta
+        if candidate_is_multi_member and row_has_meaningful_item_data(candidate, columns):
+            items.append(
+                LineItem(
+                    sale_id=candidate_sale or main_sale,
+                    units=clean_value(candidate[columns.units]) or "1",
+                    sku=normalize_sku(candidate[columns.sku]),
+                    title=clean_value(candidate[columns.title]),
                 )
+            )
+            next_index += 1
+            continue
 
-                if starts_new_normal_order and not looks_like_child_row(candidate, columns):
-                    break
+        # Si no viene marcada como miembro de paquete,
+        # aquí sí evaluamos si ya empezó otra venta normal
+        starts_new_normal_order = (
+            candidate_sale != ""
+            and candidate_sale != main_sale
+            and candidate_state != ""
+            and extract_package_size(candidate_state) is None
+            and not candidate_is_multi_member
+        )
 
-                if row_has_meaningful_item_data(candidate, columns):
-                    items.append(
-                        LineItem(
-                            sale_id=clean_value(candidate[columns.sale]) or main_sale,
-                            units=clean_value(candidate[columns.units]) or "1",
-                            sku=normalize_sku(candidate[columns.sku]),
-                            title=clean_value(candidate[columns.title]),
-                        )
-                    )
-                    next_index += 1
-                    continue
+        if starts_new_normal_order and not looks_like_child_row(candidate, columns):
+            break
 
-                # Si la fila no aporta nada útil, dejamos de consumir
-                break
+        # Fallback: si no hay columna de paquete múltiple pero la fila parece hija, tomarla
+        if row_has_meaningful_item_data(candidate, columns) and looks_like_child_row(candidate, columns):
+            items.append(
+                LineItem(
+                    sale_id=candidate_sale or main_sale,
+                    units=clean_value(candidate[columns.units]) or "1",
+                    sku=normalize_sku(candidate[columns.sku]),
+                    title=clean_value(candidate[columns.title]),
+                )
+            )
+            next_index += 1
+            continue
+
+        break
 
             if items:
                 orders.append(
