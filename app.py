@@ -160,12 +160,10 @@ def normalize_text(value: object) -> str:
     return text.lower().strip()
 
 
-
 def clean_value(value: object) -> str:
     if pd.isna(value):
         return ""
     return str(value).strip()
-
 
 
 def safe_paragraph_text(value: object, default: str = "-") -> str:
@@ -173,12 +171,10 @@ def safe_paragraph_text(value: object, default: str = "-") -> str:
     return escape(text).replace("\n", "<br/>")
 
 
-
 def slugify_filename(name: str) -> str:
     text = normalize_text(name)
     text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
     return text or "archivo"
-
 
 
 def to_number(value: object) -> float | None:
@@ -195,16 +191,37 @@ def to_number(value: object) -> float | None:
         return None
 
 
-
 def format_number(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else f"{value:.2f}"
-
 
 
 def normalize_sku(value: object) -> str:
     sku = clean_value(value)
     return sku.upper().strip()
 
+
+def is_cancelled_state(state_value: object) -> bool:
+    text = normalize_text(state_value)
+    if not text:
+        return False
+
+    cancelled_markers = (
+        "cancelado",
+        "cancelada",
+        "cancelados",
+        "canceladas",
+        "cancelacion",
+        "cancelación",
+        "cancel",
+        "anulado",
+        "anulada",
+        "anulacion",
+        "anulación",
+        "paquete cancelado",
+        "cancelado por mercado libre",
+        "cancelada por mercado libre",
+    )
+    return any(marker in text for marker in cancelled_markers)
 
 
 def looks_like_header_artifact(row: pd.Series, columns: ResolvedColumns) -> bool:
@@ -229,12 +246,10 @@ def looks_like_header_artifact(row: pd.Series, columns: ResolvedColumns) -> bool
     return any(marker in joined for marker in suspicious_markers)
 
 
-
 def build_product_name_for_pdf(item: LineItem) -> str:
     sku = escape(item.sku) if clean_value(item.sku) else "SIN SKU"
     title = escape(item.title) if clean_value(item.title) else "Sin descripción"
     return f"<b>{sku}</b><br/>{title}"
-
 
 
 def pick_canonical_product_name(names: Sequence[str]) -> str:
@@ -317,7 +332,6 @@ def resolve_source_columns(df: pd.DataFrame) -> tuple[ResolvedColumns, list[str]
     )
 
 
-
 def detect_header_row(raw_df: pd.DataFrame, max_scan_rows: int = 15) -> int:
     best_index = -1
     best_score = -1
@@ -345,7 +359,6 @@ def detect_header_row(raw_df: pd.DataFrame, max_scan_rows: int = 15) -> int:
     return best_index
 
 
-
 def load_source_dataframe(excel_file: BinaryIO) -> tuple[pd.DataFrame, ResolvedColumns, list[str]]:
     raw_df = pd.read_excel(excel_file, header=None)
     raw_df = raw_df.dropna(how="all").reset_index(drop=True)
@@ -363,13 +376,11 @@ def load_source_dataframe(excel_file: BinaryIO) -> tuple[pd.DataFrame, ResolvedC
     return df, columns, warnings
 
 
-
 def extract_package_size(state_value: str) -> int | None:
     match = PACKAGE_PATTERN.search(state_value)
     if not match:
         return None
     return int(match.group(1))
-
 
 
 def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[OrderGroup], list[str]]:
@@ -388,6 +399,14 @@ def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[Order
 
         state = clean_value(row[columns.state])
         main_sale = clean_value(row[columns.sale]) or f"SIN-VENTA-{i + 1}"
+
+        if is_cancelled_state(state):
+            warnings.append(
+                f"La venta '{main_sale}' fue omitida porque su estado es '{state}'."
+            )
+            i += 1
+            continue
+
         package_size = extract_package_size(state)
 
         if package_size:
@@ -402,8 +421,18 @@ def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[Order
 
             for offset in range(1, real_size + 1):
                 child_row = df.iloc[i + offset]
+
                 if looks_like_header_artifact(child_row, columns):
                     continue
+
+                child_state = clean_value(child_row[columns.state])
+                if is_cancelled_state(child_state):
+                    warnings.append(
+                        f"Se omitió un artículo hijo cancelado dentro de la venta '{main_sale}' "
+                        f"porque su estado es '{child_state}'."
+                    )
+                    continue
+
                 items.append(
                     LineItem(
                         sale_id=clean_value(child_row[columns.sale]),
@@ -415,7 +444,7 @@ def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[Order
 
             if not items:
                 warnings.append(
-                    f"La venta '{main_sale}' estaba marcada como paquete, pero no se encontraron artículos hijos. Se exportó como individual."
+                    f"La venta '{main_sale}' estaba marcada como paquete, pero no se encontraron artículos hijos válidos. Se exportó como individual."
                 )
                 items = [
                     LineItem(
@@ -537,7 +566,6 @@ def build_control_dataframe(orders: Iterable[OrderGroup]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-
 def build_detail_dataframe(orders: Iterable[OrderGroup]) -> pd.DataFrame:
     rows = []
     for order in orders:
@@ -556,7 +584,6 @@ def build_detail_dataframe(orders: Iterable[OrderGroup]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-
 def build_preparation_dataframe(preparation_items: Iterable[PreparationItem]) -> pd.DataFrame:
     rows = []
     for idx, item in enumerate(preparation_items, start=1):
@@ -569,7 +596,6 @@ def build_preparation_dataframe(preparation_items: Iterable[PreparationItem]) ->
             }
         )
     return pd.DataFrame(rows)
-
 
 
 def build_summary_dataframe(orders: Iterable[OrderGroup], preparation_items: Iterable[PreparationItem]) -> pd.DataFrame:
@@ -702,7 +728,6 @@ def build_styles() -> dict[str, ParagraphStyle]:
     }
 
 
-
 def make_metric_box(label: str, value: str, width: float, styles: dict[str, ParagraphStyle]) -> Table:
     table = Table(
         [
@@ -724,7 +749,6 @@ def make_metric_box(label: str, value: str, width: float, styles: dict[str, Para
         )
     )
     return table
-
 
 
 def build_intro_block(
@@ -884,7 +908,6 @@ def build_orders_table(orders: list[OrderGroup], width: float, styles: dict[str,
     return table
 
 
-
 def build_main_pdf_buffer(orders: list[OrderGroup], page_label: str) -> io.BytesIO:
     styles = build_styles()
     page_size = PAGE_OPTIONS[page_label]
@@ -991,7 +1014,6 @@ def build_preparation_table(items: list[PreparationItem], width: float, styles: 
     return table
 
 
-
 def build_preparation_pdf_buffer(preparation_items: list[PreparationItem], page_label: str) -> io.BytesIO:
     styles = build_styles()
     page_size = PAGE_OPTIONS[page_label]
@@ -1037,7 +1059,6 @@ def build_preparation_pdf_buffer(preparation_items: list[PreparationItem], page_
     )
     buffer.seek(0)
     return buffer
-
 
 
 def draw_page_decoration(canvas, doc, title: str) -> None:
@@ -1116,7 +1137,6 @@ def render_metrics(orders: list[OrderGroup], preparation_items: list[Preparation
     col4.metric("Unidades a preparar", format_number(total_prep_units))
 
 
-
 def render_downloads(main_pdf_buffer: io.BytesIO, prep_pdf_buffer: io.BytesIO) -> None:
     today_str = datetime.now().strftime("%Y-%m-%d")
 
@@ -1141,7 +1161,6 @@ def render_downloads(main_pdf_buffer: io.BytesIO, prep_pdf_buffer: io.BytesIO) -
         )
 
 
-
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
@@ -1157,6 +1176,7 @@ def main() -> None:
             - La **cantidad** ahora va en su propia columna, separada del producto.
             - Se eliminó la columna **Iniciales / Hora** del PDF principal.
             - Los **paquetes** siguen agrupados correctamente bajo la misma venta.
+            - Las ventas **canceladas** ya no salen en los PDFs.
             - Se genera un segundo PDF con la **preparación total por SKU** antes del empacado.
             - La consolidación usa **SKU como llave principal**, no el nombre del producto.
             """
