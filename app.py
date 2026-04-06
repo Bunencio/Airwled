@@ -1118,20 +1118,24 @@ def render_metrics(orders: list[OrderGroup], preparation_items: list[Preparation
 
 
 def render_downloads(main_pdf_buffer: io.BytesIO, prep_pdf_buffer: io.BytesIO) -> None:
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
     col1, col2 = st.columns(2)
+
     with col1:
         st.download_button(
             label="Descargar PDF de empaque",
             data=main_pdf_buffer.getvalue(),
-            file_name="lista_empaque_profesional.pdf",
+            file_name=f"lista_empaque_{today_str}.pdf",
             mime="application/pdf",
             use_container_width=True,
         )
+
     with col2:
         st.download_button(
             label="Descargar PDF de preparación por SKU",
             data=prep_pdf_buffer.getvalue(),
-            file_name="lista_preparacion_por_sku.pdf",
+            file_name=f"lista_preparacion_por_sku_{today_str}.pdf",
             mime="application/pdf",
             use_container_width=True,
         )
