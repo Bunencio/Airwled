@@ -189,6 +189,34 @@ def normalize_sku(value: object) -> str:
     sku = clean_value(value)
     return sku.upper().strip()
 
+def is_cancelled_state(state_value: object) -> bool:
+    text = normalize_text(state_value)
+
+    if not text:
+        return False
+
+    cancelled_markers = (
+        "cancelado",
+        "cancelada",
+        "cancelados",
+        "canceladas",
+        "cancelacion",
+        "cancelación",
+        "cancel",
+        "anulado",
+        "anulada",
+        "anulacion",
+        "anulación",
+        "rechazado",
+        "rechazada",
+        "devuelto",
+        "devuelta",
+        "paquete cancelado",
+        "cancelado por mercado libre",
+        "cancelada por mercado libre",
+    )
+
+    return any(marker in text for marker in cancelled_markers)
 
 def build_product_name_for_pdf(item: LineItem) -> str:
     sku = escape(item.sku) if clean_value(item.sku) else "SIN SKU"
@@ -420,16 +448,25 @@ def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[Order
     i = 0
 
     while i < len(df):
-        row = df.iloc[i]
+    row = df.iloc[i]
 
-        if looks_like_header_artifact(row, columns):
-            skipped_artifacts += 1
-            i += 1
-            continue
+    if looks_like_header_artifact(row, columns):
+        skipped_artifacts += 1
+        i += 1
+        continue
 
-        main_sale = clean_value(row[columns.sale]) or f"SIN-VENTA-{i + 1}"
-        state = clean_value(row[columns.state])
-        package_size = extract_package_size(state)
+    main_sale = clean_value(row[columns.sale]) or f"SIN-VENTA-{i + 1}"
+    state = clean_value(row[columns.state])
+
+    # NUEVO: saltar ventas canceladas para que no salgan en el PDF
+    if is_cancelled_state(state):
+        warnings.append(
+            f"La venta '{main_sale}' fue omitida porque su estado es '{state}'."
+        )
+        i += 1
+        continue
+
+    package_size = extract_package_size(state)
 
         # ---------------------------------------------------------------------
         # CASO PAQUETE
@@ -440,8 +477,19 @@ def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[Order
 
             while next_index < len(df) and len(items) < package_size:
                 candidate = df.iloc[next_index]
-
+            
                 if looks_like_header_artifact(candidate, columns):
+                    next_index += 1
+                    continue
+            
+                candidate_state = clean_value(candidate[columns.state])
+            
+                # NUEVO: si el hijo está cancelado, no se agrega al paquete
+                if is_cancelled_state(candidate_state):
+                    warnings.append(
+                        f"Se omitió un renglón hijo cancelado dentro de la venta '{main_sale}' "
+                        f"porque su estado es '{candidate_state}'."
+                    )
                     next_index += 1
                     continue
 
@@ -451,7 +499,7 @@ def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[Order
 
                 # Si trae un # de venta distinto y además parece una venta normal, ya no es hija
                 candidate_sale = clean_value(candidate[columns.sale])
-                candidate_state = clean_value(candidate[columns.state])
+         
 
                 starts_new_normal_order = (
                     candidate_sale != ""
