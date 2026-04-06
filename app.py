@@ -3,7 +3,6 @@ from __future__ import annotations
 import io
 import re
 import unicodedata
-from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from typing import BinaryIO, Iterable, Sequence
@@ -19,7 +18,6 @@ from reportlab.platypus import Flowable, LongTable, Paragraph, SimpleDocTemplate
 
 
 APP_TITLE = "Generador profesional de listas de empaque"
-HEADER_ROW_INDEX = 4  # fila 5 del Excel
 PACKAGE_PATTERN = re.compile(r"paquete\s+de\s+(\d+)", re.IGNORECASE)
 
 PAGE_OPTIONS: dict[str, tuple[float, float]] = {
@@ -40,10 +38,8 @@ COLOR_HEADER = colors.HexColor("#1F2937")
 COLOR_SUBHEADER = colors.HexColor("#E5E7EB")
 COLOR_ROW_ALT = colors.HexColor("#F9FAFB")
 COLOR_ROW = colors.HexColor("#FFFFFF")
-COLOR_ACCENT = colors.HexColor("#D1D5DB")
 COLOR_TEXT_SOFT = colors.HexColor("#4B5563")
 COLOR_PACKAGE = colors.HexColor("#EEF2FF")
-COLOR_WARNING = colors.HexColor("#FEF3C7")
 
 
 @dataclass(frozen=True)
@@ -160,25 +156,15 @@ def normalize_text(value: object) -> str:
     return text.lower().strip()
 
 
-
 def clean_value(value: object) -> str:
     if pd.isna(value):
         return ""
     return str(value).strip()
 
 
-
 def safe_paragraph_text(value: object, default: str = "-") -> str:
     text = clean_value(value) or default
     return escape(text).replace("\n", "<br/>")
-
-
-
-def slugify_filename(name: str) -> str:
-    text = normalize_text(name)
-    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
-    return text or "archivo"
-
 
 
 def to_number(value: object) -> float | None:
@@ -195,10 +181,8 @@ def to_number(value: object) -> float | None:
         return None
 
 
-
 def format_number(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else f"{value:.2f}"
-
 
 
 def normalize_sku(value: object) -> str:
@@ -206,14 +190,45 @@ def normalize_sku(value: object) -> str:
     return sku.upper().strip()
 
 
+def build_product_name_for_pdf(item: LineItem) -> str:
+    sku = escape(item.sku) if clean_value(item.sku) else "SIN SKU"
+    title = escape(item.title) if clean_value(item.title) else "Sin descripción"
+    return f"<b>{sku}</b><br/>{title}"
+
+
+def pick_canonical_product_name(names: Sequence[str]) -> str:
+    cleaned = [clean_value(name) for name in names if clean_value(name)]
+    if not cleaned:
+        return "Sin descripción"
+    cleaned.sort(key=lambda x: (-len(x), x.lower()))
+    return cleaned[0]
+
+
+def is_effectively_blank(value: object) -> bool:
+    text = clean_value(value)
+    return text == ""
+
+
+def row_has_meaningful_item_data(row: pd.Series, columns: ResolvedColumns) -> bool:
+    sku = clean_value(row[columns.sku])
+    title = clean_value(row[columns.title])
+    units = clean_value(row[columns.units])
+
+    if sku or title:
+        return True
+
+    qty = to_number(units)
+    return qty is not None and qty > 0
+
 
 def looks_like_header_artifact(row: pd.Series, columns: ResolvedColumns) -> bool:
     sale = normalize_text(row[columns.sale])
     title = normalize_text(row[columns.title])
     sku = normalize_text(row[columns.sku])
     units = normalize_text(row[columns.units])
+    state = normalize_text(row[columns.state])
 
-    joined = " ".join(part for part in (sale, title, sku, units) if part)
+    joined = " ".join(part for part in (sale, title, sku, units, state) if part)
     if not joined:
         return True
 
@@ -225,24 +240,41 @@ def looks_like_header_artifact(row: pd.Series, columns: ResolvedColumns) -> bool
         "contenido verificado",
         "producto",
         "cantidad",
+        "fecha de venta",
+        "descripcion del estado",
     )
     return any(marker in joined for marker in suspicious_markers)
 
 
-
-def build_product_name_for_pdf(item: LineItem) -> str:
-    sku = escape(item.sku) if clean_value(item.sku) else "SIN SKU"
-    title = escape(item.title) if clean_value(item.title) else "Sin descripción"
-    return f"<b>{sku}</b><br/>{title}"
+def looks_like_package_summary_row(row: pd.Series, columns: ResolvedColumns) -> bool:
+    state = clean_value(row[columns.state])
+    return extract_package_size(state) is not None
 
 
+def looks_like_child_row(row: pd.Series, columns: ResolvedColumns) -> bool:
+    if looks_like_header_artifact(row, columns):
+        return False
 
-def pick_canonical_product_name(names: Sequence[str]) -> str:
-    cleaned = [clean_value(name) for name in names if clean_value(name)]
-    if not cleaned:
-        return "Sin descripción"
-    cleaned.sort(key=lambda x: (-len(x), x.lower()))
-    return cleaned[0]
+    state = clean_value(row[columns.state])
+    sale = clean_value(row[columns.sale])
+    sku = clean_value(row[columns.sku])
+    title = clean_value(row[columns.title])
+    units = clean_value(row[columns.units])
+
+    # Una fila hija normalmente no vuelve a iniciar otro paquete
+    if extract_package_size(state) is not None:
+        return False
+
+    # Si no trae estado pero sí SKU/título/cantidad, es muy probable que sea hija
+    if not state and (sku or title or units):
+        return True
+
+    return False
+
+
+def reset_excel_pointer(excel_file: BinaryIO) -> None:
+    if hasattr(excel_file, "seek"):
+        excel_file.seek(0)
 
 
 # -----------------------------------------------------------------------------
@@ -317,13 +349,14 @@ def resolve_source_columns(df: pd.DataFrame) -> tuple[ResolvedColumns, list[str]
     )
 
 
-
 def detect_header_row(raw_df: pd.DataFrame, max_scan_rows: int = 15) -> int:
     best_index = -1
     best_score = -1
+
     for idx in range(min(len(raw_df), max_scan_rows)):
         row_values = [normalize_text(value) for value in raw_df.iloc[idx].tolist()]
         score = 0
+
         if any(value == "# de venta" for value in row_values):
             score += 5
         if any(value == "sku" for value in row_values):
@@ -334,34 +367,37 @@ def detect_header_row(raw_df: pd.DataFrame, max_scan_rows: int = 15) -> int:
             score += 3
         if sum(1 for value in row_values if value == "unidades") >= 1:
             score += 3
+
         if score > best_score:
             best_score = score
             best_index = idx
 
     if best_index < 0 or best_score < 10:
-        raise ValueError(
-            "No se pudo detectar automáticamente la fila de encabezados del reporte."
-        )
+        raise ValueError("No se pudo detectar automáticamente la fila de encabezados del reporte.")
+
     return best_index
 
 
-
 def load_source_dataframe(excel_file: BinaryIO) -> tuple[pd.DataFrame, ResolvedColumns, list[str]]:
-    raw_df = pd.read_excel(excel_file, header=None)
+    reset_excel_pointer(excel_file)
+    raw_df = pd.read_excel(excel_file, header=None, dtype=str)
     raw_df = raw_df.dropna(how="all").reset_index(drop=True)
+
     if raw_df.empty:
         raise ValueError("El archivo no contiene datos válidos.")
 
     header_row_index = detect_header_row(raw_df)
-    df = pd.read_excel(excel_file, header=header_row_index)
+
+    reset_excel_pointer(excel_file)
+    df = pd.read_excel(excel_file, header=header_row_index, dtype=str)
     df = df.dropna(how="all").reset_index(drop=True)
+
     if df.empty:
         raise ValueError("El archivo no contiene datos válidos después de la fila de encabezados.")
 
     columns, warnings = resolve_source_columns(df)
     warnings.insert(0, f"Fila de encabezados detectada automáticamente: {header_row_index + 1}.")
     return df, columns, warnings
-
 
 
 def extract_package_size(state_value: str) -> int | None:
@@ -371,8 +407,13 @@ def extract_package_size(state_value: str) -> int | None:
     return int(match.group(1))
 
 
-
 def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[OrderGroup], list[str]]:
+    """
+    Soporta ambos casos:
+    1) Venta normal individual.
+    2) Venta marcada como "Paquete de N productos" con filas hijas debajo.
+    3) Venta marcada como paquete pero sin filas hijas completas -> se exporta como individual.
+    """
     orders: list[OrderGroup] = []
     warnings: list[str] = []
     skipped_artifacts = 0
@@ -386,54 +427,100 @@ def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[Order
             i += 1
             continue
 
-        state = clean_value(row[columns.state])
         main_sale = clean_value(row[columns.sale]) or f"SIN-VENTA-{i + 1}"
+        state = clean_value(row[columns.state])
         package_size = extract_package_size(state)
 
+        # ---------------------------------------------------------------------
+        # CASO PAQUETE
+        # ---------------------------------------------------------------------
         if package_size:
-            available_rows = len(df) - (i + 1)
-            real_size = min(package_size, available_rows)
             items: list[LineItem] = []
+            next_index = i + 1
 
-            if available_rows < package_size:
-                warnings.append(
-                    f"La venta '{main_sale}' indica 'Paquete de {package_size}', pero solo hay {available_rows} filas posteriores disponibles."
-                )
+            while next_index < len(df) and len(items) < package_size:
+                candidate = df.iloc[next_index]
 
-            for offset in range(1, real_size + 1):
-                child_row = df.iloc[i + offset]
-                if looks_like_header_artifact(child_row, columns):
+                if looks_like_header_artifact(candidate, columns):
+                    next_index += 1
                     continue
-                items.append(
-                    LineItem(
-                        sale_id=clean_value(child_row[columns.sale]),
-                        units=clean_value(child_row[columns.units]),
-                        sku=normalize_sku(child_row[columns.sku]),
-                        title=clean_value(child_row[columns.title]),
+
+                # Si aparece otra venta-paquete, se corta el bloque
+                if looks_like_package_summary_row(candidate, columns):
+                    break
+
+                # Si trae un # de venta distinto y además parece una venta normal, ya no es hija
+                candidate_sale = clean_value(candidate[columns.sale])
+                candidate_state = clean_value(candidate[columns.state])
+
+                starts_new_normal_order = (
+                    candidate_sale != ""
+                    and candidate_sale != main_sale
+                    and candidate_state != ""
+                    and extract_package_size(candidate_state) is None
+                )
+
+                if starts_new_normal_order and not looks_like_child_row(candidate, columns):
+                    break
+
+                if row_has_meaningful_item_data(candidate, columns):
+                    items.append(
+                        LineItem(
+                            sale_id=clean_value(candidate[columns.sale]) or main_sale,
+                            units=clean_value(candidate[columns.units]) or "1",
+                            sku=normalize_sku(candidate[columns.sku]),
+                            title=clean_value(candidate[columns.title]),
+                        )
+                    )
+                    next_index += 1
+                    continue
+
+                # Si la fila no aporta nada útil, dejamos de consumir
+                break
+
+            if items:
+                orders.append(
+                    OrderGroup(
+                        main_sale=main_sale,
+                        delivery_type=f"JUNTO ({len(items)} productos)",
+                        items=items,
                     )
                 )
 
-            if not items:
-                warnings.append(
-                    f"La venta '{main_sale}' estaba marcada como paquete, pero no se encontraron artículos hijos. Se exportó como individual."
-                )
-                items = [
-                    LineItem(
-                        sale_id=main_sale,
-                        units=clean_value(row[columns.units]),
-                        sku=normalize_sku(row[columns.sku]),
-                        title=clean_value(row[columns.title]),
+                if len(items) < package_size:
+                    warnings.append(
+                        f"La venta '{main_sale}' indica 'Paquete de {package_size}', "
+                        f"pero solo se pudieron identificar {len(items)} producto(s) hijo."
                     )
-                ]
-                delivery_type = "INDIVIDUAL"
-                i += 1
-            else:
-                delivery_type = f"JUNTO ({len(items)} productos)"
-                i += package_size + 1
 
-            orders.append(OrderGroup(main_sale=main_sale, delivery_type=delivery_type, items=items))
+                i = next_index
+                continue
+
+            # Fallback seguro: si no hay hijos, tratarlo como individual
+            warnings.append(
+                f"La venta '{main_sale}' está marcada como '{state}', "
+                "pero no se encontraron renglones hijos válidos. Se exportó como individual."
+            )
+            orders.append(
+                OrderGroup(
+                    main_sale=main_sale,
+                    delivery_type="INDIVIDUAL",
+                    items=[
+                        LineItem(
+                            sale_id=main_sale,
+                            units=clean_value(row[columns.units]) or "1",
+                            sku=normalize_sku(row[columns.sku]),
+                            title=clean_value(row[columns.title]),
+                        )
+                    ],
+                )
+            )
+            i += 1
             continue
 
+        # ---------------------------------------------------------------------
+        # CASO INDIVIDUAL
+        # ---------------------------------------------------------------------
         orders.append(
             OrderGroup(
                 main_sale=main_sale,
@@ -441,7 +528,7 @@ def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[Order
                 items=[
                     LineItem(
                         sale_id=main_sale,
-                        units=clean_value(row[columns.units]),
+                        units=clean_value(row[columns.units]) or "1",
                         sku=normalize_sku(row[columns.sku]),
                         title=clean_value(row[columns.title]),
                     )
@@ -451,7 +538,9 @@ def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[Order
         i += 1
 
     if skipped_artifacts:
-        warnings.append(f"Se omitieron {skipped_artifacts} fila(s) que parecían encabezados o texto auxiliar dentro del Excel.")
+        warnings.append(
+            f"Se omitieron {skipped_artifacts} fila(s) que parecían encabezados o texto auxiliar dentro del Excel."
+        )
 
     return orders, warnings
 
@@ -467,6 +556,7 @@ def build_preparation_items(orders: Iterable[OrderGroup]) -> tuple[list[Preparat
 
     for order in orders:
         seen_skus_in_order: set[str] = set()
+
         for item in order.items:
             sku = normalize_sku(item.sku)
             qty = item.qty_number
@@ -537,26 +627,6 @@ def build_control_dataframe(orders: Iterable[OrderGroup]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-
-def build_detail_dataframe(orders: Iterable[OrderGroup]) -> pd.DataFrame:
-    rows = []
-    for order in orders:
-        for idx, item in enumerate(order.items, start=1):
-            rows.append(
-                {
-                    "Venta principal": order.main_sale,
-                    "Tipo": order.delivery_type,
-                    "Renglón": idx,
-                    "Venta hijo": item.sale_id,
-                    "Cantidad": item.units,
-                    "SKU": item.sku,
-                    "Producto": item.title,
-                }
-            )
-    return pd.DataFrame(rows)
-
-
-
 def build_preparation_dataframe(preparation_items: Iterable[PreparationItem]) -> pd.DataFrame:
     rows = []
     for idx, item in enumerate(preparation_items, start=1):
@@ -571,17 +641,16 @@ def build_preparation_dataframe(preparation_items: Iterable[PreparationItem]) ->
     return pd.DataFrame(rows)
 
 
-
-def build_summary_dataframe(orders: Iterable[OrderGroup], preparation_items: Iterable[PreparationItem]) -> pd.DataFrame:
+def build_summary_dataframe(
+    orders: Iterable[OrderGroup],
+    preparation_items: Iterable[PreparationItem],
+) -> pd.DataFrame:
     order_list = list(orders)
     prep_list = list(preparation_items)
     grouped_count = sum(1 for order in order_list if order.is_package)
     individual_count = len(order_list) - grouped_count
     product_lines = sum(order.item_count for order in order_list)
-
-    total_detected_units = sum(
-        item.total_units for item in prep_list
-    )
+    total_detected_units = sum(item.total_units for item in prep_list)
 
     return pd.DataFrame(
         [
@@ -702,7 +771,6 @@ def build_styles() -> dict[str, ParagraphStyle]:
     }
 
 
-
 def make_metric_box(label: str, value: str, width: float, styles: dict[str, ParagraphStyle]) -> Table:
     table = Table(
         [
@@ -724,7 +792,6 @@ def make_metric_box(label: str, value: str, width: float, styles: dict[str, Para
         )
     )
     return table
-
 
 
 def build_intro_block(
@@ -847,8 +914,10 @@ def build_orders_table(orders: list[OrderGroup], width: float, styles: dict[str,
 
     row_index = 1
     order_number = 1
+
     for order in orders:
         start_row = row_index
+
         for item in order.items:
             data.append(
                 [
@@ -861,6 +930,7 @@ def build_orders_table(orders: list[OrderGroup], width: float, styles: dict[str,
                 ]
             )
             row_index += 1
+
         end_row = row_index - 1
 
         if end_row > start_row:
@@ -882,7 +952,6 @@ def build_orders_table(orders: list[OrderGroup], width: float, styles: dict[str,
     table = LongTable(data, colWidths=col_widths, repeatRows=1, splitByRow=1)
     table.setStyle(TableStyle(style_commands))
     return table
-
 
 
 def build_main_pdf_buffer(orders: list[OrderGroup], page_label: str) -> io.BytesIO:
@@ -911,7 +980,8 @@ def build_main_pdf_buffer(orders: list[OrderGroup], page_label: str) -> io.Bytes
             document_title="Lista de empaque",
             subtitle=(
                 "Se separó la cantidad del producto para eliminar confusión visual. "
-                "La columna de Iniciales/Hora fue removida y los paquetes conservan agrupación por venta."
+                "Cuando el Excel incluye hijos de un paquete, se mantienen agrupados; "
+                "si no vienen, la venta se exporta como individual para no perderla."
             ),
             metrics=[
                 ("Entregas", str(len(orders))),
@@ -991,7 +1061,6 @@ def build_preparation_table(items: list[PreparationItem], width: float, styles: 
     return table
 
 
-
 def build_preparation_pdf_buffer(preparation_items: list[PreparationItem], page_label: str) -> io.BytesIO:
     styles = build_styles()
     page_size = PAGE_OPTIONS[page_label]
@@ -1037,7 +1106,6 @@ def build_preparation_pdf_buffer(preparation_items: list[PreparationItem], page_
     )
     buffer.seek(0)
     return buffer
-
 
 
 def draw_page_decoration(canvas, doc, title: str) -> None:
@@ -1116,9 +1184,9 @@ def render_metrics(orders: list[OrderGroup], preparation_items: list[Preparation
     col4.metric("Unidades a preparar", format_number(total_prep_units))
 
 
-
 def render_downloads(main_pdf_buffer: io.BytesIO, prep_pdf_buffer: io.BytesIO) -> None:
     col1, col2 = st.columns(2)
+
     with col1:
         st.download_button(
             label="Descargar PDF de empaque",
@@ -1127,6 +1195,7 @@ def render_downloads(main_pdf_buffer: io.BytesIO, prep_pdf_buffer: io.BytesIO) -
             mime="application/pdf",
             use_container_width=True,
         )
+
     with col2:
         st.download_button(
             label="Descargar PDF de preparación por SKU",
@@ -1135,7 +1204,6 @@ def render_downloads(main_pdf_buffer: io.BytesIO, prep_pdf_buffer: io.BytesIO) -
             mime="application/pdf",
             use_container_width=True,
         )
-
 
 
 def main() -> None:
@@ -1152,13 +1220,15 @@ def main() -> None:
 
             - La **cantidad** ahora va en su propia columna, separada del producto.
             - Se eliminó la columna **Iniciales / Hora** del PDF principal.
-            - Los **paquetes** siguen agrupados correctamente bajo la misma venta.
+            - Los **paquetes** se agrupan cuando el Excel trae renglones hijo válidos.
+            - Si un paquete no trae renglones hijo completos, **no falla**: se exporta como individual.
             - Se genera un segundo PDF con la **preparación total por SKU** antes del empacado.
             - La consolidación usa **SKU como llave principal**, no el nombre del producto.
             """
         )
 
     col_a, col_b = st.columns([1.3, 1])
+
     with col_a:
         page_label = st.radio(
             "Formato PDF",
@@ -1166,6 +1236,7 @@ def main() -> None:
             index=0,
             horizontal=True,
         )
+
     with col_b:
         st.markdown("**Recomendación:** Carta horizontal para impresoras estándar.")
 
