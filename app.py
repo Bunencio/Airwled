@@ -448,25 +448,25 @@ def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[Order
     i = 0
 
     while i < len(df):
-    row = df.iloc[i]
-
-    if looks_like_header_artifact(row, columns):
-        skipped_artifacts += 1
-        i += 1
-        continue
-
-    main_sale = clean_value(row[columns.sale]) or f"SIN-VENTA-{i + 1}"
-    state = clean_value(row[columns.state])
-
-    # NUEVO: saltar ventas canceladas para que no salgan en el PDF
-    if is_cancelled_state(state):
-        warnings.append(
-            f"La venta '{main_sale}' fue omitida porque su estado es '{state}'."
-        )
-        i += 1
-        continue
-
-    package_size = extract_package_size(state)
+        row = df.iloc[i]
+    
+        if looks_like_header_artifact(row, columns):
+            skipped_artifacts += 1
+            i += 1
+            continue
+    
+        main_sale = clean_value(row[columns.sale]) or f"SIN-VENTA-{i + 1}"
+        state = clean_value(row[columns.state])
+    
+        # NUEVO: saltar ventas canceladas para que no salgan en el PDF
+        if is_cancelled_state(state):
+            warnings.append(
+                f"La venta '{main_sale}' fue omitida porque su estado es '{state}'."
+            )
+            i += 1
+            continue
+    
+        package_size = extract_package_size(state)
 
         # ---------------------------------------------------------------------
         # CASO PAQUETE
