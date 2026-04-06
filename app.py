@@ -405,7 +405,7 @@ def resolve_source_columns(df: pd.DataFrame) -> tuple[ResolvedColumns, list[str]
         f"sku='{resolved['sku']}', producto='{resolved['title']}'."
     )
 
-        multi_product_flag = resolve_optional_multi_product_column(df)
+    multi_product_flag = resolve_optional_multi_product_column(df)
 
     if multi_product_flag:
         warnings.append(
