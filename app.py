@@ -524,75 +524,75 @@ def parse_orders(df: pd.DataFrame, columns: ResolvedColumns) -> tuple[list[Order
         # CASO PAQUETE
         # ---------------------------------------------------------------------
         if package_size:
-    items: list[LineItem] = []
-    next_index = i + 1
-
-    while next_index < len(df) and len(items) < package_size:
-        candidate = df.iloc[next_index]
-
-        if looks_like_header_artifact(candidate, columns):
-            next_index += 1
-            continue
-
-        candidate_state = clean_value(candidate[columns.state])
-
-        if is_cancelled_state(candidate_state):
-            warnings.append(
-                f"Se omitió un renglón hijo cancelado dentro de la venta '{main_sale}' "
-                f"porque su estado es '{candidate_state}'."
-            )
-            next_index += 1
-            continue
-
-        # Si aparece otra fila resumen de paquete, aquí se termina el bloque actual
-        if looks_like_package_summary_row(candidate, columns):
-            break
-
-        candidate_sale = clean_value(candidate[columns.sale])
-        candidate_is_multi_member = is_multi_product_member(candidate, columns)
-
-        # CASO IMPORTANTE:
-        # si la fila viene marcada con "Paquete de varios productos" = Sí,
-        # entonces sí pertenece al paquete aunque tenga otro # de venta
-        if candidate_is_multi_member and row_has_meaningful_item_data(candidate, columns):
-            items.append(
-                LineItem(
-                    sale_id=candidate_sale or main_sale,
-                    units=clean_value(candidate[columns.units]) or "1",
-                    sku=normalize_sku(candidate[columns.sku]),
-                    title=clean_value(candidate[columns.title]),
+            items: list[LineItem] = []
+            next_index = i + 1
+        
+            while next_index < len(df) and len(items) < package_size:
+                candidate = df.iloc[next_index]
+        
+                if looks_like_header_artifact(candidate, columns):
+                    next_index += 1
+                    continue
+        
+                candidate_state = clean_value(candidate[columns.state])
+        
+                if is_cancelled_state(candidate_state):
+                    warnings.append(
+                        f"Se omitió un renglón hijo cancelado dentro de la venta '{main_sale}' "
+                        f"porque su estado es '{candidate_state}'."
+                    )
+                    next_index += 1
+                    continue
+        
+                # Si aparece otra fila resumen de paquete, aquí se termina el bloque actual
+                if looks_like_package_summary_row(candidate, columns):
+                    break
+        
+                candidate_sale = clean_value(candidate[columns.sale])
+                candidate_is_multi_member = is_multi_product_member(candidate, columns)
+        
+                # CASO IMPORTANTE:
+                # si la fila viene marcada con "Paquete de varios productos" = Sí,
+                # entonces sí pertenece al paquete aunque tenga otro # de venta
+                if candidate_is_multi_member and row_has_meaningful_item_data(candidate, columns):
+                    items.append(
+                        LineItem(
+                            sale_id=candidate_sale or main_sale,
+                            units=clean_value(candidate[columns.units]) or "1",
+                            sku=normalize_sku(candidate[columns.sku]),
+                            title=clean_value(candidate[columns.title]),
+                        )
+                    )
+                    next_index += 1
+                    continue
+        
+                # Si no viene marcada como miembro de paquete,
+                # aquí sí evaluamos si ya empezó otra venta normal
+                starts_new_normal_order = (
+                    candidate_sale != ""
+                    and candidate_sale != main_sale
+                    and candidate_state != ""
+                    and extract_package_size(candidate_state) is None
+                    and not candidate_is_multi_member
                 )
-            )
-            next_index += 1
-            continue
-
-        # Si no viene marcada como miembro de paquete,
-        # aquí sí evaluamos si ya empezó otra venta normal
-        starts_new_normal_order = (
-            candidate_sale != ""
-            and candidate_sale != main_sale
-            and candidate_state != ""
-            and extract_package_size(candidate_state) is None
-            and not candidate_is_multi_member
-        )
-
-        if starts_new_normal_order and not looks_like_child_row(candidate, columns):
-            break
-
-        # Fallback: si no hay columna de paquete múltiple pero la fila parece hija, tomarla
-        if row_has_meaningful_item_data(candidate, columns) and looks_like_child_row(candidate, columns):
-            items.append(
-                LineItem(
-                    sale_id=candidate_sale or main_sale,
-                    units=clean_value(candidate[columns.units]) or "1",
-                    sku=normalize_sku(candidate[columns.sku]),
-                    title=clean_value(candidate[columns.title]),
-                )
-            )
-            next_index += 1
-            continue
-
-        break
+        
+                if starts_new_normal_order and not looks_like_child_row(candidate, columns):
+                    break
+        
+                # Fallback: si no hay columna de paquete múltiple pero la fila parece hija, tomarla
+                if row_has_meaningful_item_data(candidate, columns) and looks_like_child_row(candidate, columns):
+                    items.append(
+                        LineItem(
+                            sale_id=candidate_sale or main_sale,
+                            units=clean_value(candidate[columns.units]) or "1",
+                            sku=normalize_sku(candidate[columns.sku]),
+                            title=clean_value(candidate[columns.title]),
+                        )
+                    )
+                    next_index += 1
+                    continue
+        
+                break
 
             if items:
                 orders.append(
