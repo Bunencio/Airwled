@@ -123,11 +123,16 @@ COLUMN_RULES: tuple[ColumnRule, ...] = (
     ColumnRule("sale", 0, ("venta", "pedido", "order", "folio")),
     ColumnRule("state", 2, ("estado", "status")),
     ColumnRule("units", 6, ("unidades", "cantidad", "cant", "qty")),
-    ColumnRule("sku", 17, ("sku", "seller sku", "codigo", "código", "asin", "referencia")),
+    # IMPORTANTE:
+    # Estas reglas son intencionalmente estrictas. Antes se aceptaban alias como
+    # "codigo", "referencia", "producto" o "descripcion", pero en reportes de
+    # Mercado Libre eso puede hacer que la app tome columnas equivocadas como
+    # "Contenido verificado" o "Tienda oficial".
+    ColumnRule("sku", 17, ("sku", "seller sku")),
     ColumnRule(
         "title",
         21,
-        ("titulo", "título", "producto", "descripcion", "descripción", "articulo", "artículo"),
+        ("titulo de la publicacion", "título de la publicación", "titulo", "título"),
     ),
 )
 
@@ -266,24 +271,70 @@ def pick_canonical_product_name(names: Sequence[str]) -> str:
 
 
 def resolve_source_columns(df: pd.DataFrame) -> tuple[ResolvedColumns, list[str]]:
+    """Detecta columnas principales sin confundir campos parecidos.
+
+    La detección anterior era demasiado flexible y podía elegir columnas como
+    "Contenido verificado" para SKU o "Tienda oficial" para Producto. Esta
+    versión prioriza coincidencias exactas y, si no encuentra una columna segura,
+    usa el índice de respaldo del layout estándar del reporte.
+    """
     normalized_headers = [(column, normalize_text(column)) for column in df.columns]
     warnings: list[str] = []
     resolved: dict[str, str] = {}
+    used_columns: set[str] = set()
 
     preferred_exact_matches: dict[str, tuple[str, ...]] = {
         "sale": ("# de venta", "venta", "pedido", "order", "folio"),
-        "state": ("estado",),
-        "units": ("unidades", "cantidad", "qty"),
+        "state": ("estado", "status"),
+        "units": ("unidades", "cantidad", "cant", "qty"),
         "sku": ("sku", "seller sku"),
-        "title": ("titulo de la publicacion", "titulo", "producto", "descripcion"),
+        "title": ("titulo de la publicacion", "título de la publicación", "titulo", "título"),
     }
 
+    # Encabezados que NO deben ser considerados SKU aunque contengan la palabra SKU.
+    blocked_sku_headers = (
+        "contenido verificado",
+        "verificado",
+        "sin sku",
+        "tiene sku",
+        "validacion",
+        "validación",
+    )
+
+    # Encabezados que NO deben ser considerados producto/título.
+    blocked_title_headers = (
+        "tienda",
+        "vendedor",
+        "marca",
+        "catalogo",
+        "catálogo",
+        "canal",
+        "publicidad",
+    )
+
+    def is_blocked(rule_key: str, normalized_header: str) -> bool:
+        if rule_key == "sku":
+            return any(marker in normalized_header for marker in blocked_sku_headers)
+        if rule_key == "title":
+            return any(marker in normalized_header for marker in blocked_title_headers)
+        return False
+
     def score_header(rule: ColumnRule, normalized_header: str, column_position: int) -> tuple[int, int]:
+        if is_blocked(rule.key, normalized_header):
+            return (-1, -column_position)
+
         exacts = tuple(normalize_text(v) for v in preferred_exact_matches.get(rule.key, ()))
         aliases = tuple(normalize_text(v) for v in rule.aliases)
 
         if normalized_header in exacts:
-            return (400, -column_position)
+            return (500, -column_position)
+
+        # Para SKU y título no aceptamos coincidencias demasiado amplias.
+        if rule.key in {"sku", "title"}:
+            if any(normalized_header.startswith(alias) for alias in aliases):
+                return (350, -column_position)
+            return (-1, -column_position)
+
         if any(normalized_header.startswith(alias) for alias in exacts):
             return (350, -column_position)
         if any(re.search(rf"(^|\b){re.escape(alias)}(\b|$)", normalized_header) for alias in aliases):
@@ -297,6 +348,8 @@ def resolve_source_columns(df: pd.DataFrame) -> tuple[ResolvedColumns, list[str]
         best_score = (-1, 0)
 
         for idx, (column_name, normalized_header) in enumerate(normalized_headers):
+            if str(column_name) in used_columns:
+                continue
             candidate_score = score_header(rule, normalized_header, idx)
             if candidate_score > best_score:
                 best_score = candidate_score
@@ -309,10 +362,12 @@ def resolve_source_columns(df: pd.DataFrame) -> tuple[ResolvedColumns, list[str]
                 )
             best_column = df.columns[rule.fallback_index]
             warnings.append(
-                f"La columna '{rule.key}' no se encontró por nombre; se usó la columna en posición {rule.fallback_index + 1} ({best_column})."
+                f"La columna '{rule.key}' no se encontró de forma segura por nombre; se usó la columna en posición {rule.fallback_index + 1} ({best_column}). "
+                "Si el resultado no coincide, corrige las columnas en el panel de ajuste manual."
             )
 
         resolved[rule.key] = best_column
+        used_columns.add(str(best_column))
 
     warnings.append(
         "Columnas detectadas: "
@@ -330,7 +385,6 @@ def resolve_source_columns(df: pd.DataFrame) -> tuple[ResolvedColumns, list[str]
         ),
         warnings,
     )
-
 
 def detect_header_row(raw_df: pd.DataFrame, max_scan_rows: int = 15) -> int:
     best_index = -1
@@ -360,12 +414,15 @@ def detect_header_row(raw_df: pd.DataFrame, max_scan_rows: int = 15) -> int:
 
 
 def load_source_dataframe(excel_file: BinaryIO) -> tuple[pd.DataFrame, ResolvedColumns, list[str]]:
+    excel_file.seek(0)
     raw_df = pd.read_excel(excel_file, header=None)
     raw_df = raw_df.dropna(how="all").reset_index(drop=True)
     if raw_df.empty:
         raise ValueError("El archivo no contiene datos válidos.")
 
     header_row_index = detect_header_row(raw_df)
+
+    excel_file.seek(0)
     df = pd.read_excel(excel_file, header=header_row_index)
     df = df.dropna(how="all").reset_index(drop=True)
     if df.empty:
@@ -1087,11 +1144,13 @@ def draw_page_decoration(canvas, doc, title: str) -> None:
 # -----------------------------------------------------------------------------
 
 
-def generate_files(
-    excel_file: BinaryIO,
+def generate_files_from_dataframe(
+    source_df: pd.DataFrame,
+    columns: ResolvedColumns,
     page_label: str,
+    initial_warnings: list[str] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, io.BytesIO, io.BytesIO, list[str], list[OrderGroup], list[PreparationItem]]:
-    source_df, columns, warnings = load_source_dataframe(excel_file)
+    warnings = list(initial_warnings or [])
     orders, parse_warnings = parse_orders(source_df, columns)
     warnings.extend(parse_warnings)
 
@@ -1117,6 +1176,14 @@ def generate_files(
         orders,
         preparation_items,
     )
+
+
+def generate_files(
+    excel_file: BinaryIO,
+    page_label: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, io.BytesIO, io.BytesIO, list[str], list[OrderGroup], list[PreparationItem]]:
+    source_df, columns, warnings = load_source_dataframe(excel_file)
+    return generate_files_from_dataframe(source_df, columns, page_label, warnings)
 
 
 # -----------------------------------------------------------------------------
@@ -1179,6 +1246,7 @@ def main() -> None:
             - Las ventas **canceladas** ya no salen en los PDFs.
             - Se genera un segundo PDF con la **preparación total por SKU** antes del empacado.
             - La consolidación usa **SKU como llave principal**, no el nombre del producto.
+            - Ahora puedes **corregir manualmente las columnas** antes de generar, para evitar que aparezcan valores como "SÍ", "SIN SKU" o "Airweld Alliance" en columnas incorrectas.
             """
         )
 
@@ -1199,6 +1267,62 @@ def main() -> None:
         return
 
     try:
+        source_df, detected_columns, detection_warnings = load_source_dataframe(uploaded_file)
+
+        st.subheader("1) Revisa columnas detectadas")
+        st.caption(
+            "Si ves que SKU apunta a una columna con valores como 'SÍ' o Producto apunta a 'Airweld Alliance', corrígelo aquí antes de generar."
+        )
+
+        column_options = list(source_df.columns)
+
+        def safe_index(column_name: str) -> int:
+            try:
+                return column_options.index(column_name)
+            except ValueError:
+                return 0
+
+        with st.expander("Ajustar columnas manualmente", expanded=True):
+            c1, c2, c3, c4, c5 = st.columns(5)
+            with c1:
+                sale_col = st.selectbox("Venta", column_options, index=safe_index(detected_columns.sale))
+            with c2:
+                state_col = st.selectbox("Estado", column_options, index=safe_index(detected_columns.state))
+            with c3:
+                units_col = st.selectbox("Unidades", column_options, index=safe_index(detected_columns.units))
+            with c4:
+                sku_col = st.selectbox("SKU", column_options, index=safe_index(detected_columns.sku))
+            with c5:
+                title_col = st.selectbox("Producto / título", column_options, index=safe_index(detected_columns.title))
+
+            selected_columns = ResolvedColumns(
+                sale=sale_col,
+                state=state_col,
+                units=units_col,
+                sku=sku_col,
+                title=title_col,
+            )
+
+            preview_cols = [
+                selected_columns.sale,
+                selected_columns.state,
+                selected_columns.units,
+                selected_columns.sku,
+                selected_columns.title,
+            ]
+            st.markdown("**Vista previa con columnas seleccionadas:**")
+            st.dataframe(source_df[preview_cols].head(12), use_container_width=True, height=300)
+
+        if detection_warnings:
+            with st.expander("Ver advertencias de detección"):
+                for warning in detection_warnings:
+                    st.warning(warning)
+
+        st.subheader("2) Genera archivos")
+        if not st.button("Generar PDFs", type="primary", use_container_width=True):
+            st.info("Revisa las columnas y presiona **Generar PDFs**.")
+            return
+
         with st.spinner("Procesando archivo y construyendo PDFs profesionales..."):
             (
                 summary_df,
@@ -1209,7 +1333,7 @@ def main() -> None:
                 warnings,
                 orders,
                 preparation_items,
-            ) = generate_files(uploaded_file, page_label)
+            ) = generate_files_from_dataframe(source_df, selected_columns, page_label, detection_warnings)
 
         st.success("Proceso completado correctamente.")
         render_metrics(orders, preparation_items)
